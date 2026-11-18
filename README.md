@@ -113,11 +113,15 @@ PS5 ──HDMI──► carte de capture ──USB 3──► Media Foundation �
 Différences avec le mode Remote Play :
 - la fenêtre est un plein écran normal qui prend le focus (Échap quitte) ;
 - le seuil de doublon descend à 0.4 par défaut (les images répétées sont identiques au pixel près) ;
-- **le son n'est pas géré** : écoute-le via la sortie HDMI de recopie de la carte ou sa prise casque.
+- **le son de la carte est relayé** vers la sortie audio par défaut (WASAPI, ~10 ms de tampon, jamais
+  plus de 60 ms : l'excédent est jeté pour rester synchro avec l'image). L'entrée audio est trouvée
+  d'après le nom de la carte ; sinon `--audio-device "nom"` (voir `--list-devices`). Réglage du
+  volume dans l'overlay ou `--audio-volume 0.8` ; `--no-audio` si tu écoutes via la recopie HDMI.
 
 Toute carte UVC (vue par Windows comme une webcam) fonctionne, c'est-à-dire la plupart des cartes
-USB récentes. Le chemin a été validé avec une webcam USB (même pilote UVC), pas encore avec une
-vraie carte HDMI ni une PS5.
+USB récentes. Image et son ont été validés avec une webcam USB et son micro (même pilotes UVC et
+audio USB), pas encore avec une vraie carte HDMI ni une PS5. La copie depuis la mémoire système
+(cartes qui ne livrent pas d'images sur le GPU) n'a pas pu être testée.
 
 ## Tester sans PS5
 

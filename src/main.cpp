@@ -1,4 +1,5 @@
 #include "app.hpp"
+#include "capture/audio_passthrough.hpp"
 #include "capture/mf_capture.hpp"
 #include "capture/wgc_capture.hpp"
 #include "config.hpp"
@@ -34,6 +35,11 @@ int WINAPI wWinMain(HINSTANCE, HINSTANCE, PWSTR, int) {
             for (const auto& d : devices) {
                 text += d + L"\n";
                 log_msg("%s", narrow(d).c_str());
+            }
+            text += L"\nEntrées audio :\n\n";
+            for (const auto& a : list_audio_inputs()) {
+                text += a + L"\n";
+                log_msg("audio : %s", narrow(a).c_str());
             }
         } catch (const std::exception& e) {
             text += widen(e.what());

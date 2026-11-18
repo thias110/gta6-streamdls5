@@ -14,6 +14,9 @@ struct Config {
     bool  list_devices  = false;
     std::wstring device;          // sous-chaîne du nom de la carte ; vide = auto
     std::wstring mode;            // "1920x1080@60" ; vide = auto
+    bool  audio         = true;   // relais du son de la carte (mode HDMI)
+    std::wstring audio_device;    // sous-chaîne du nom de l'entrée audio ; vide = auto
+    float audio_volume  = 1.0f;
     bool  windowed      = false;  // fenêtre classique au lieu de l'overlay plein écran
     bool  aspect_crop   = true;   // recadre la zone client en 16:9 (enlève les bandes noires)
     bool  test_pattern  = false;  // source synthétique 30 fps dans un flux 60 fps

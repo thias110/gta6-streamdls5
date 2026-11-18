@@ -12,7 +12,10 @@ const wchar_t* usage_text() {
   --hdmi                      PS5 branchée sur une carte de capture HDMI
   --device <txt>              sous-chaîne du nom de la carte (implique --hdmi)
   --mode <WxH@fps>            mode de capture, ex. 1920x1080@60 (défaut : auto)
-  --list-devices              liste les cartes de capture / périphériques vidéo
+  --list-devices              liste les cartes de capture et les entrées audio
+  --audio-device <txt>        entrée audio de la carte (défaut : auto)
+  --audio-volume <0..1>       volume du son relayé (défaut : 1)
+  --no-audio                  ne relaie pas le son de la carte
 
   --windowed                  fenêtre classique au lieu de l'overlay plein écran
   --monitor <n>               moniteur de l'overlay (0, 1, ...)
@@ -62,6 +65,9 @@ Config parse_command_line() {
         else if (s == L"--list-devices") c.list_devices = true;
         else if (s == L"--device") { c.device = value(i); c.hdmi = true; }
         else if (s == L"--mode") { c.mode = value(i); c.hdmi = true; }
+        else if (s == L"--no-audio") c.audio = false;
+        else if (s == L"--audio-device") c.audio_device = value(i);
+        else if (s == L"--audio-volume") c.audio_volume = number(i);
         else if (s == L"--window" || s == L"-w") c.window = value(i);
         else if (s == L"--windowed") c.windowed = true;
         else if (s == L"--monitor") c.monitor = int(number(i));
@@ -90,6 +96,7 @@ Config parse_command_line() {
     // HDMI : pas de réencodage, les images répétées sont identiques ; un seuil bas ne rate aucun petit mouvement.
     if (c.hdmi && !dup_set) c.dup_threshold = 0.4f;
 
+    c.audio_volume  = std::clamp(c.audio_volume, 0.0f, 1.0f);
     c.sharpness     = std::clamp(c.sharpness, 0.0f, 1.0f);
     c.dup_threshold = std::clamp(c.dup_threshold, 0.0f, 50.0f);
     c.delay_scale   = std::clamp(c.delay_scale, 1.0f, 3.0f);

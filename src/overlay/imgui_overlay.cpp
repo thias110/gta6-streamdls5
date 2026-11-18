@@ -49,7 +49,9 @@ void ImguiOverlay::render(ID3D11RenderTargetView* rtv, const OverlayModel& m, Pi
         ImGui::Text("Capture %ux%u -> sortie %ux%u @ %.0f Hz", info.capture.width, info.capture.height,
                     info.output.width, info.output.height, m.refresh_hz);
         if (info.capture.width > 0 && info.capture.height < 1000)
-            ImGui::TextColored(warn, "Capture < 1080p : agrandis la fenêtre Remote Play (plein écran).");
+            ImGui::TextColored(warn, m.hdmi ? "Capture < 1080p : choisis un meilleur mode (--mode, --list-devices)."
+                                            : "Capture < 1080p : agrandis la fenêtre Remote Play (plein écran).");
+        if (m.hdmi) ImGui::TextDisabled("Son : écoute via la sortie HDMI de recopie ou la prise casque de la carte.");
 
         ImGui::SeparatorText("Cadence");
         ImGui::Text("capturé   %6.1f fps", s.captured_fps);

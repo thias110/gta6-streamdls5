@@ -39,6 +39,7 @@ private:
     bool        quit_           = false;
     bool        resize_pending_ = false;
     bool        hotkeys_        = false;
+    bool        passive_        = false;  // overlay qui ne prend jamais le focus (mode Remote Play)
     double      refresh_hz_     = 60.0;
     std::string source_name_;
 };

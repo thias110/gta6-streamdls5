@@ -1,4 +1,5 @@
 #include "app.hpp"
+#include "capture/mf_capture.hpp"
 #include "capture/wgc_capture.hpp"
 #include "config.hpp"
 #include "selftest.hpp"
@@ -24,6 +25,23 @@ int WINAPI wWinMain(HINSTANCE, HINSTANCE, PWSTR, int) {
     }
 
     winrt::init_apartment(winrt::apartment_type::multi_threaded);
+
+    if (cfg.list_devices) {
+        std::wstring text = L"Cartes de capture / périphériques vidéo :\n\n";
+        try {
+            auto devices = list_capture_devices();
+            if (devices.empty()) text += L"(aucun)\n";
+            for (const auto& d : devices) {
+                text += d + L"\n";
+                log_msg("%s", narrow(d).c_str());
+            }
+        } catch (const std::exception& e) {
+            text += widen(e.what());
+        }
+        if (text.find(L"(aucun)") != std::wstring::npos) log_msg("(aucun périphérique vidéo)");
+        MessageBoxW(nullptr, text.c_str(), L"rpenhance --list-devices", MB_OK);
+        return 0;
+    }
 
     if (cfg.list_windows) {
         std::wstring text = L"Fenêtres capturables :\n\n";

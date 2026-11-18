@@ -42,6 +42,7 @@ add_executable(rpenhance WIN32
     src/gpu/profiler.cpp
     src/capture/wgc_capture.cpp
     src/capture/test_source.cpp
+    src/capture/mf_capture.cpp
     src/pipeline/compositor.cpp
     src/pipeline/motion.cpp
     src/pipeline/upscaler.cpp
@@ -58,4 +59,5 @@ target_link_libraries(rpenhance PRIVATE
     imgui_lib
     d3d11 dxgi dxguid d3dcompiler
     dwmapi windowsapp
+    mfplat mf mfreadwrite mfuuid
 )

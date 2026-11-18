@@ -8,6 +8,7 @@ struct OverlayModel {
     std::string adapter;
     double      refresh_hz   = 60.0;
     bool        overlay_mode = true;
+    bool        hdmi         = false;
 };
 
 class ImguiOverlay {

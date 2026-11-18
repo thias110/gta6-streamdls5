@@ -8,12 +8,18 @@ const wchar_t* usage_text() {
   titre / -w, --window <txt>  sous-chaîne du titre de la fenêtre à capturer
                               (défaut : "PS Remote Play" puis "chiaki")
   --list                      liste les fenêtres capturables
+
+  --hdmi                      PS5 branchée sur une carte de capture HDMI
+  --device <txt>              sous-chaîne du nom de la carte (implique --hdmi)
+  --mode <WxH@fps>            mode de capture, ex. 1920x1080@60 (défaut : auto)
+  --list-devices              liste les cartes de capture / périphériques vidéo
+
   --windowed                  fenêtre classique au lieu de l'overlay plein écran
   --monitor <n>               moniteur de l'overlay (0, 1, ...)
   --upscale off|bicubic|vsr   méthode d'upscale (défaut : vsr)
   --sharpness <0..1>          netteté du mode bicubic (défaut : 0.35)
   --no-fg                     désactive la frame generation
-  --dup-threshold <x>         seuil de détection des doublons (défaut : 1.2)
+  --dup-threshold <x>         seuil de détection des doublons (défaut : 1.2, 0.4 en HDMI)
   --delay <x>                 marge du retard d'interpolation (défaut : 1.15)
   --no-crop                   ne recadre pas la capture en 16:9
   --no-tearing                pas de tearing/VRR sans frame generation
@@ -47,10 +53,15 @@ Config parse_command_line() {
         }
     };
 
+    bool dup_set = false;
     for (size_t i = 0; i < a.size(); ++i) {
         const std::wstring& s = a[i];
         if (s == L"--help" || s == L"-h" || s == L"/?") c.help = true;
         else if (s == L"--list") c.list_windows = true;
+        else if (s == L"--hdmi") c.hdmi = true;
+        else if (s == L"--list-devices") c.list_devices = true;
+        else if (s == L"--device") { c.device = value(i); c.hdmi = true; }
+        else if (s == L"--mode") { c.mode = value(i); c.hdmi = true; }
         else if (s == L"--window" || s == L"-w") c.window = value(i);
         else if (s == L"--windowed") c.windowed = true;
         else if (s == L"--monitor") c.monitor = int(number(i));
@@ -63,7 +74,7 @@ Config parse_command_line() {
         else if (s == L"--no-fg") c.frame_gen = false;
         else if (s == L"--fg") c.frame_gen = true;
         else if (s == L"--sharpness") c.sharpness = number(i);
-        else if (s == L"--dup-threshold") c.dup_threshold = number(i);
+        else if (s == L"--dup-threshold") { c.dup_threshold = number(i); dup_set = true; }
         else if (s == L"--delay") c.delay_scale = number(i);
         else if (s == L"--upscale") {
             auto v = to_lower(value(i));
@@ -75,6 +86,9 @@ Config parse_command_line() {
         else if (!s.empty() && s[0] == L'-') throw std::invalid_argument("option inconnue : " + narrow(s));
         else c.window = s;
     }
+
+    // HDMI : pas de réencodage, les images répétées sont identiques ; un seuil bas ne rate aucun petit mouvement.
+    if (c.hdmi && !dup_set) c.dup_threshold = 0.4f;
 
     c.sharpness     = std::clamp(c.sharpness, 0.0f, 1.0f);
     c.dup_threshold = std::clamp(c.dup_threshold, 0.0f, 50.0f);

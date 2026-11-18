@@ -88,8 +88,36 @@ Options : `rpenhance.exe --help`. Les plus utiles :
 | `--delay 1.15` | marge du retard ; à monter si l'image saccade quand le réseau varie |
 | `--windowed` | fenêtre classique au lieu de l'overlay |
 | `--monitor 1` | overlay sur un autre écran |
+| `--hdmi` | carte de capture HDMI au lieu de la Remote Play (voir plus bas) |
 
 Le journal est écrit dans `rpenhance.log` à côté de l'exe (stats toutes les 5 s).
+
+## Mode carte de capture HDMI (branche `hdmi-capture`)
+
+La PS5 est branchée en HDMI sur une carte de capture USB au lieu de passer par la Remote Play :
+pas de réseau, pas de compression vidéo, et la manette est branchée directement sur la console.
+
+```
+PS5 ──HDMI──► carte de capture ──USB 3──► Media Foundation ──► même pipeline (doublons, upscale, interpolation)
+                    └──HDMI (recopie)──► TV / écran (optionnel, zéro latence, son)
+```
+
+1. Sur la PS5 : **Paramètres > Système > HDMI > Activer HDCP : désactivé**, sinon la carte reçoit
+   une image noire.
+2. Branche la carte en USB 3 et vérifie qu'elle apparaît : `rpenhance.exe --list-devices`.
+3. Lance `rpenhance.exe --hdmi`. La carte est détectée par son nom (Elgato, AVerMedia, « capture »,
+   « HDMI », « USB Video »...), sinon `--device "nom"`. Le meilleur mode est choisi automatiquement
+   (≥ 60 fps, puis la plus grande résolution, puis non compressé) ; pour forcer :
+   `--mode 1920x1080@60`.
+
+Différences avec le mode Remote Play :
+- la fenêtre est un plein écran normal qui prend le focus (Échap quitte) ;
+- le seuil de doublon descend à 0.4 par défaut (les images répétées sont identiques au pixel près) ;
+- **le son n'est pas géré** : écoute-le via la sortie HDMI de recopie de la carte ou sa prise casque.
+
+Toute carte UVC (vue par Windows comme une webcam) fonctionne, c'est-à-dire la plupart des cartes
+USB récentes. Le chemin a été validé avec une webcam USB (même pilote UVC), pas encore avec une
+vraie carte HDMI ni une PS5.
 
 ## Tester sans PS5
 

@@ -1,5 +1,6 @@
 #include "app.hpp"
 
+#include "capture/mf_capture.hpp"
 #include "capture/test_source.hpp"
 #include "capture/wgc_capture.hpp"
 
@@ -33,6 +34,22 @@ App::~App() {
 }
 
 bool App::open_source() {
+    if (cfg_.hdmi) {
+        auto cap = std::make_unique<MfCaptureSource>(d3d_);
+        if (!cap->start(cfg_.device, cfg_.mode)) {
+            std::wstring msg = L"Carte de capture introuvable";
+            msg += cfg_.device.empty() ? L"." : L" : \"" + cfg_.device + L"\".";
+            msg += L"\n\nBranche-la (USB 3), vérifie qu'elle apparaît comme périphérique vidéo, et que la PS5 a "
+                   L"HDCP désactivé (Paramètres > Système > HDMI).\nPériphériques vidéo vus :\n";
+            for (const auto& n : list_capture_devices()) msg += L"  • " + n + L"\n";
+            log_msg("%s", narrow(msg).c_str());
+            MessageBoxW(nullptr, msg.c_str(), L"rpenhance", MB_OK | MB_ICONWARNING);
+            return false;
+        }
+        source_name_ = cap->name();
+        source_      = std::move(cap);
+        return true;
+    }
     if (cfg_.test_pattern) {
         source_      = std::make_unique<TestSource>(d3d_, pipe_->compositor());
         source_name_ = source_->name();
@@ -90,13 +107,20 @@ void App::create_window() {
         hwnd_ = CreateWindowExW(0, wc.lpszClassName, L"rpenhance", WS_OVERLAPPEDWINDOW, mi.rcWork.left + 40,
                                 mi.rcWork.top + 40, r.right - r.left, r.bottom - r.top, nullptr, nullptr, inst, this);
         ShowWindow(hwnd_, SW_SHOW);
-    } else {
+    } else if (passive_) {
         // Overlay plein écran au-dessus de la remote play, qui garde le focus (et donc la manette).
         const RECT& m = mi.rcMonitor;
         hwnd_ = CreateWindowExW(WS_EX_TOPMOST | WS_EX_NOACTIVATE | WS_EX_TOOLWINDOW, wc.lpszClassName, L"rpenhance",
                                 WS_POPUP, m.left, m.top, m.right - m.left, m.bottom - m.top, nullptr, nullptr, inst,
                                 this);
         ShowWindow(hwnd_, SW_SHOWNOACTIVATE);
+    } else {
+        // Carte HDMI : la manette est sur la PS5, la fenêtre peut prendre le focus (plein écran sans bordure).
+        const RECT& m = mi.rcMonitor;
+        hwnd_ = CreateWindowExW(0, wc.lpszClassName, L"rpenhance", WS_POPUP, m.left, m.top, m.right - m.left,
+                                m.bottom - m.top, nullptr, nullptr, inst, this);
+        ShowWindow(hwnd_, SW_SHOW);
+        SetForegroundWindow(hwnd_);
     }
     if (!hwnd_) throw_hr(HRESULT_FROM_WIN32(GetLastError()), "CreateWindowEx");
     refresh_hz_ = query_refresh_rate();
@@ -166,7 +190,7 @@ LRESULT App::on_message(HWND h, UINT m, WPARAM w, LPARAM l) {
         return 0;
     case WM_HOTKEY: on_hotkey(int(w)); return 0;
     case WM_MOUSEACTIVATE:
-        if (!cfg_.windowed) return MA_NOACTIVATE;
+        if (passive_) return MA_NOACTIVATE;
         break;
     case WM_KEYDOWN:
         if (w == VK_ESCAPE) quit_ = true;
@@ -190,6 +214,7 @@ int App::run() {
     s.dup_threshold = cfg_.dup_threshold;
     s.delay_scale   = cfg_.delay_scale;
 
+    passive_ = !cfg_.windowed && !cfg_.hdmi;
     if (!open_source()) return 1;
     create_window();
     sc_.create(d3d_, hwnd_, client_size());
@@ -203,7 +228,7 @@ int App::run() {
     for (auto [id, vk] : keys) {
         if (!RegisterHotKey(hwnd_, id, mods, vk)) log_msg("Raccourci Ctrl+Alt+%c déjà pris par une autre appli", char(vk));
     }
-    if (!cfg_.windowed && target_) {
+    if (passive_ && target_) {
         if (!SetForegroundWindow(target_))
             log_msg("Impossible de redonner le focus à la remote play : fais Alt+Tab dessus.");
     }
@@ -211,8 +236,9 @@ int App::run() {
     OverlayModel model;
     model.source_name  = source_name_;
     model.adapter      = d3d_.adapter_name();
-    model.overlay_mode = !cfg_.windowed;
-    log_msg("Démarré : %s, overlay %s, %.0f Hz", source_name_.c_str(), cfg_.windowed ? "non" : "oui", refresh_hz_);
+    model.overlay_mode = passive_;
+    model.hdmi         = cfg_.hdmi;
+    log_msg("Démarré : %s, overlay %s, %.0f Hz", source_name_.c_str(), passive_ ? "oui" : "non", refresh_hz_);
 
     double last_log = now_seconds();
     while (!quit_ && !overlay_.quit_requested) {
@@ -224,7 +250,7 @@ int App::run() {
         }
         if (quit_) break;
         if (!source_->alive()) {
-            log_msg("La fenêtre capturée a été fermée.");
+            log_msg(cfg_.hdmi ? "La carte de capture a cessé d'envoyer des images." : "La fenêtre capturée a été fermée.");
             break;
         }
         if (resize_pending_) {

@@ -1,4 +1,5 @@
 #pragma once
+#include "capture/audio_passthrough.hpp"
 #include "capture/frame_source.hpp"
 #include "config.hpp"
 #include "gpu/profiler.hpp"
@@ -32,6 +33,7 @@ private:
     std::unique_ptr<FrameSource> source_;
     Swapchain           sc_;
     ImguiOverlay        overlay_;
+    AudioPassthrough    audio_;
 
     HWND        hwnd_   = nullptr;
     HWND        target_ = nullptr;

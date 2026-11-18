@@ -1,4 +1,5 @@
 #include "imgui_overlay.hpp"
+#include "../capture/audio_passthrough.hpp"
 
 #include "imgui.h"
 #include "imgui_impl_dx11.h"
@@ -26,7 +27,7 @@ void ImguiOverlay::init(HWND hwnd, D3DContext& d3d, float dpi_scale) {
     init_ = true;
 }
 
-void ImguiOverlay::render(ID3D11RenderTargetView* rtv, const OverlayModel& m, Pipeline& pipe,
+void ImguiOverlay::render(ID3D11RenderTargetView* rtv, OverlayModel& m, Pipeline& pipe,
                           const FrameStatsCollector& stats, const GpuProfiler& prof, double now) {
     if (!init_) return;
     ImGui_ImplDX11_NewFrame();
@@ -51,7 +52,12 @@ void ImguiOverlay::render(ID3D11RenderTargetView* rtv, const OverlayModel& m, Pi
         if (info.capture.width > 0 && info.capture.height < 1000)
             ImGui::TextColored(warn, m.hdmi ? "Capture < 1080p : choisis un meilleur mode (--mode, --list-devices)."
                                             : "Capture < 1080p : agrandis la fenêtre Remote Play (plein écran).");
-        if (m.hdmi) ImGui::TextDisabled("Son : écoute via la sortie HDMI de recopie ou la prise casque de la carte.");
+        if (m.hdmi && m.audio) {
+            ImGui::Text("Son : %s (%.0f ms en tampon)", m.audio->name().c_str(), m.audio->buffered_ms());
+            if (ImGui::SliderFloat("Volume", &m.audio_volume, 0.0f, 1.0f, "%.2f")) m.audio->set_volume(m.audio_volume);
+        } else if (m.hdmi) {
+            ImGui::TextColored(warn, "Son non relayé : --audio-device \"nom\" (voir --list-devices).");
+        }
 
         ImGui::SeparatorText("Cadence");
         ImGui::Text("capturé   %6.1f fps", s.captured_fps);

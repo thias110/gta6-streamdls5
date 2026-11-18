@@ -46,6 +46,7 @@ add_executable(rpenhance WIN32
     src/capture/tap_protocol.cpp
     src/capture/tap_source.cpp
     src/capture/mf_capture.cpp
+    src/capture/audio_passthrough.cpp
     src/pipeline/compositor.cpp
     src/pipeline/motion.cpp
     src/pipeline/dedupe.cpp

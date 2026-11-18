@@ -31,6 +31,7 @@ BOOL CALLBACK enum_monitor(HMONITOR m, HDC, LPRECT, LPARAM lp) {
 App::App(const Config& cfg) : cfg_(cfg) {}
 
 App::~App() {
+    audio_.stop();
     if (hotkeys_) {
         for (int id = kHkStats; id <= kHkQuit; ++id) UnregisterHotKey(hwnd_, id);
     }
@@ -264,6 +265,13 @@ int App::run() {
 
     passive_ = !cfg_.windowed && !cfg_.hdmi;
     if (!open_source()) return 1;
+    if (cfg_.hdmi && cfg_.audio) {
+        try {
+            audio_.start(cfg_.audio_device, source_name_, cfg_.audio_volume);
+        } catch (const std::exception& e) {
+            log_msg("Son : relais impossible (%s) ; l'image continue sans le son.", e.what());
+        }
+    }
     create_window();
     sc_.create(d3d_, hwnd_, client_size());
     overlay_.init(hwnd_, d3d_, float(GetDpiForWindow(hwnd_)) / 96.0f);
@@ -286,6 +294,8 @@ int App::run() {
     model.adapter      = d3d_.adapter_name();
     model.overlay_mode = passive_;
     model.hdmi         = cfg_.hdmi;
+    model.audio        = audio_.running() ? &audio_ : nullptr;
+    model.audio_volume = cfg_.audio_volume;
     log_msg("Démarré : %s, overlay %s, %.0f Hz", source_name_.c_str(), passive_ ? "oui" : "non", refresh_hz_);
 
     double last_log = now_seconds();
@@ -391,6 +401,10 @@ int App::run() {
                     st.captured_fps, st.unique_fps, st.present_fps, st.generated_pct, info.capture.width,
                     info.capture.height, info.output.width, info.output.height,
                     Upscaler::path_name(info.upscale_path), info.delay_ms, prof_.ms(GpuSection::Flow));
+            if (audio_.running())
+                log_msg("son : %.1f ms en tampon | %llu trames relayées, %llu jetées", audio_.buffered_ms(),
+                        static_cast<unsigned long long>(audio_.frames_relayed()),
+                        static_cast<unsigned long long>(audio_.frames_dropped()));
         }
     }
     return 0;

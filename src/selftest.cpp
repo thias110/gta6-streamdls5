@@ -1,0 +1,197 @@
+#include "selftest.hpp"
+
+#include "capture/test_source.hpp"
+#include "gpu/profiler.hpp"
+#include "pipeline/compositor.hpp"
+#include "pipeline/motion.hpp"
+#include "pipeline/upscaler.hpp"
+
+#include <cmath>
+
+namespace {
+
+struct Image {
+    uint32_t             w = 0, h = 0;
+    std::vector<uint8_t> px;  // BGRA
+};
+
+Image readback(D3DContext& d3d, const GpuTexture& t) {
+    D3D11_TEXTURE2D_DESC d{};
+    t.tex->GetDesc(&d);
+    d.Usage          = D3D11_USAGE_STAGING;
+    d.BindFlags      = 0;
+    d.CPUAccessFlags = D3D11_CPU_ACCESS_READ;
+    d.MiscFlags      = 0;
+    ComPtr<ID3D11Texture2D> st;
+    check_hr(d3d.device()->CreateTexture2D(&d, nullptr, &st), "staging readback");
+    d3d.ctx()->CopyResource(st.Get(), t.tex.Get());
+    D3D11_MAPPED_SUBRESOURCE m{};
+    check_hr(d3d.ctx()->Map(st.Get(), 0, D3D11_MAP_READ, 0, &m), "Map readback");
+    Image img;
+    img.w = d.Width;
+    img.h = d.Height;
+    img.px.resize(size_t(d.Width) * d.Height * 4);
+    for (uint32_t y = 0; y < d.Height; ++y)
+        std::memcpy(img.px.data() + size_t(y) * d.Width * 4, static_cast<const uint8_t*>(m.pData) + size_t(y) * m.RowPitch,
+                    size_t(d.Width) * 4);
+    d3d.ctx()->Unmap(st.Get(), 0);
+    return img;
+}
+
+double psnr_from_mse(double mse) { return mse <= 1e-12 ? 99.0 : 10.0 * std::log10(255.0 * 255.0 / mse); }
+
+// PSNR RGB de `test` contre `ref` ; si `b` est fourni, test = moyenne (test + b) / 2.
+double psnr(const Image& ref, const Image& test, const Image* b = nullptr) {
+    double se = 0.0;
+    size_t n  = 0;
+    for (size_t i = 0; i < ref.px.size(); i += 4) {
+        for (size_t c = 0; c < 3; ++c) {
+            double v = test.px[i + c];
+            if (b) v = (v + b->px[i + c]) * 0.5;
+            const double d = v - ref.px[i + c];
+            se += d * d;
+            ++n;
+        }
+    }
+    return psnr_from_mse(se / double(n));
+}
+
+void write_bmp(const std::wstring& path, const Image& img) {
+    BITMAPFILEHEADER fh{};
+    BITMAPINFOHEADER ih{};
+    ih.biSize        = sizeof(ih);
+    ih.biWidth       = LONG(img.w);
+    ih.biHeight      = -LONG(img.h);  // de haut en bas
+    ih.biPlanes      = 1;
+    ih.biBitCount    = 32;
+    ih.biCompression = BI_RGB;
+    fh.bfType        = 0x4D42;
+    fh.bfOffBits     = sizeof(fh) + sizeof(ih);
+    fh.bfSize        = DWORD(fh.bfOffBits + img.px.size());
+    FILE* f = _wfopen(path.c_str(), L"wb");
+    if (!f) return;
+    std::fwrite(&fh, sizeof(fh), 1, f);
+    std::fwrite(&ih, sizeof(ih), 1, f);
+    std::fwrite(img.px.data(), 1, img.px.size(), f);
+    std::fclose(f);
+}
+
+}  // namespace
+
+int run_selftest(const Config& cfg) {
+    log_msg("== rpenhance selftest ==");
+    D3DContext d3d;
+    d3d.initialize(cfg.debug_layer);
+    auto* dev = d3d.device();
+    auto* ctx = d3d.ctx();
+
+    Compositor comp;
+    comp.init(d3d);
+    MotionEngine me;
+    me.init(d3d);
+    Upscaler up;
+    up.init(d3d, comp);
+    TestPattern tp;
+    tp.init(d3d, comp);
+    GpuProfiler prof;
+    prof.init(dev);
+
+    const Size2D cap{1920, 1080}, out{2560, 1440};
+    const UINT   rt = D3D11_BIND_SHADER_RESOURCE | D3D11_BIND_RENDER_TARGET;
+    GpuTexture A, B, GT, An, Aup, Bup, GTup, Syn, Viz;
+    for (GpuTexture* t : {&A, &B, &GT, &An}) t->ensure(dev, cap.width, cap.height, DXGI_FORMAT_B8G8R8A8_UNORM, rt, "st");
+    for (GpuTexture* t : {&Aup, &Bup, &GTup, &Syn, &Viz})
+        t->ensure(dev, out.width, out.height, DXGI_FORMAT_B8G8R8A8_UNORM, rt, "st up");
+    LumaPyramid pa, pb, pan;
+    GpuTexture  fab, fba;
+    const D3D11_VIEWPORT vp{0.0f, 0.0f, float(out.width), float(out.height), 0.0f, 1.0f};
+
+    const std::wstring dir = exe_directory() + L"selftest\\";
+    CreateDirectoryW(dir.c_str(), nullptr);
+
+    bool ok = true;
+    const float noise = 0.012f;
+    const double dt   = 1.0 / 30.0;
+    for (float speed : {1.0f, 2.5f}) {
+        const double t0 = 2.0;
+        tp.render(A, t0, noise, 1, speed);
+        tp.render(B, t0 + dt, noise, 2, speed);
+        tp.render(GT, t0 + dt * 0.5, noise, 3, speed);
+        tp.render(An, t0, noise, 4, speed);  // même image, autre bruit : un "doublon" réencodé
+
+        me.build_pyramid(pa, A.srv.Get(), cap);
+        me.build_pyramid(pb, B.srv.Get(), cap);
+        me.build_pyramid(pan, An.srv.Get(), cap);
+        const DiffResult dup = me.measure_difference(pa, pan);
+        const DiffResult uni = me.measure_difference(pa, pb);
+        const bool dedupe_ok = dup.max_tile <= cfg.dup_threshold && uni.max_tile > cfg.dup_threshold;
+        log_msg("[vitesse x%.1f] diff doublon %.2f, diff nouvelle frame %.2f (seuil %.2f) -> %s", speed, dup.max_tile,
+                uni.max_tile, cfg.dup_threshold, dedupe_ok ? "OK" : "ÉCHEC");
+
+        me.estimate_flow(pa, pb, nullptr, 1.0f, fab);
+        me.estimate_flow(pb, pa, nullptr, 1.0f, fba);
+
+        auto upscale_to = [&](const GpuTexture& src, GpuTexture& dst) {
+            const GpuTexture& u = up.run(src, out, UpscaleMode::Bicubic, 0.0f);
+            ctx->CopyResource(dst.tex.Get(), u.tex.Get());
+        };
+        upscale_to(A, Aup);
+        upscale_to(B, Bup);
+        upscale_to(GT, GTup);
+
+        comp.begin(Syn.rtv.Get(), vp);
+        comp.synth(Aup.srv.Get(), Bup.srv.Get(), fab.srv.Get(), fba.srv.Get(), 0.5f, SynthParams{});
+        comp.end();
+
+        const Image iA = readback(d3d, Aup), iB = readback(d3d, Bup), iGT = readback(d3d, GTup),
+                    iS = readback(d3d, Syn);
+        const double p_near  = psnr(iGT, iA);
+        const double p_blend = psnr(iGT, iA, &iB);
+        const double p_synth = psnr(iGT, iS);
+        const bool   interp_ok = p_synth > p_blend + 1.0 && p_synth > p_near + 1.0;
+        log_msg("[vitesse x%.1f] PSNR frame du milieu : répétition %.2f dB, fondu %.2f dB, interpolation %.2f dB -> %s",
+                speed, p_near, p_blend, p_synth, interp_ok ? "OK" : "ÉCHEC");
+        ok = ok && dedupe_ok && interp_ok;
+
+        if (speed == 1.0f) {
+            comp.begin(Viz.rtv.Get(), vp);
+            comp.flow_viz(Aup.srv.Get(), fab.srv.Get(), 25.0f);
+            comp.end();
+            write_bmp(dir + L"a.bmp", iA);
+            write_bmp(dir + L"b.bmp", iB);
+            write_bmp(dir + L"verite_milieu.bmp", iGT);
+            write_bmp(dir + L"interpolee.bmp", iS);
+            write_bmp(dir + L"flow.bmp", readback(d3d, Viz));
+        }
+    }
+
+    // Coût GPU d'une frame unique (pyramide + 2 flows) et d'une synthèse 1440p.
+    for (int i = 0; i < 60; ++i) {
+        prof.begin_frame(ctx);
+        prof.begin(ctx, GpuSection::Analyze);
+        me.build_pyramid(pb, B.srv.Get(), cap);
+        prof.end(ctx, GpuSection::Analyze);
+        prof.begin(ctx, GpuSection::Flow);
+        me.estimate_flow(pa, pb, fab.srv.Get(), 1.0f, fab);
+        me.estimate_flow(pb, pa, fab.srv.Get(), -1.0f, fba);
+        prof.end(ctx, GpuSection::Flow);
+        prof.begin(ctx, GpuSection::Compose);
+        comp.begin(Syn.rtv.Get(), vp);
+        comp.synth(Aup.srv.Get(), Bup.srv.Get(), fab.srv.Get(), fba.srv.Get(), 0.5f, SynthParams{});
+        comp.end();
+        prof.end(ctx, GpuSection::Compose);
+        prof.end_frame(ctx);
+        ctx->Flush();
+        Sleep(2);
+    }
+    log_msg("GPU : pyramide %.3f ms, flow aller+retour %.3f ms, synthèse 1440p %.3f ms", prof.ms(GpuSection::Analyze),
+            prof.ms(GpuSection::Flow), prof.ms(GpuSection::Compose));
+
+    // RTX VSR : on vérifie que la voie VideoProcessor fonctionne et que le driver accepte l'extension.
+    up.run(A, out, UpscaleMode::Vsr, 0.0f);
+    log_msg("Upscale VSR : voie %s ; %s", Upscaler::path_name(up.last_path()), up.vsr_status());
+
+    log_msg("Images écrites dans %s", narrow(dir).c_str());
+    log_msg(ok ? "SELFTEST OK" : "SELFTEST ÉCHEC");
+    return ok ? 0 : 1;
+}

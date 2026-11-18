@@ -21,6 +21,10 @@ enum class InterpMode : int {
 struct Config {
     std::wstring window;          // sous-chaîne du titre ; vide = auto ("PS Remote Play", "chiaki")
     bool  list_windows  = false;
+    bool  hdmi          = false;  // carte de capture HDMI au lieu de la fenêtre Remote Play
+    bool  list_devices  = false;
+    std::wstring device;          // sous-chaîne du nom de la carte ; vide = auto
+    std::wstring mode;            // "1920x1080@60" ; vide = auto
     bool  windowed      = false;  // fenêtre classique au lieu de l'overlay plein écran
     bool  aspect_crop   = true;   // recadre la zone client en 16:9 (enlève les bandes noires)
     bool  test_pattern  = false;  // source synthétique 30 fps dans un flux 60 fps

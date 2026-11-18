@@ -45,6 +45,7 @@ add_executable(rpenhance WIN32
     src/capture/test_source.cpp
     src/capture/tap_protocol.cpp
     src/capture/tap_source.cpp
+    src/capture/mf_capture.cpp
     src/pipeline/compositor.cpp
     src/pipeline/motion.cpp
     src/pipeline/dedupe.cpp
@@ -64,6 +65,7 @@ target_link_libraries(rpenhance PRIVATE
     imgui_lib
     d3d11 dxgi dxguid d3dcompiler
     dwmapi windowsapp
+    mfplat mf mfreadwrite mfuuid
 )
 
 # --- Backend optionnel NVIDIA Video Effects SDK (VFG / VSR) -----------------------------------------

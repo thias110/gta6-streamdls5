@@ -8,7 +8,7 @@ Pipeline::Pipeline(D3DContext& d3d, GpuProfiler& prof, FrameStatsCollector& stat
 void Pipeline::init() {
     comp_.init(d3d_);
     motion_.init(d3d_);
-    upscaler_.init(d3d_, comp_);
+    upscaler_.init(d3d_, comp_, &nvvfx_);
 }
 
 void Pipeline::reset_history() {
@@ -24,6 +24,7 @@ void Pipeline::reset_history() {
     motion_.cancel_measure();
     dup_.reset();
     info_.cadence_period = 0;
+    nvvfx_.release_textures();  // textures (re)créées : enregistrements CUDA et cache VFG périmés
 }
 
 void Pipeline::set_output_size(Size2D s) {
@@ -141,9 +142,13 @@ bool Pipeline::accept(const GpuTexture& src, double time, double arrival, Unique
     }
 
     // 2. Nouvelle frame unique : on l'ajoute à l'historique.
+    // Avec VFG chargé et fonctionnel, le flow maison et le masque de bords ne servent plus qu'à la
+    // visualisation. Tant que VFG n'a pas prouvé qu'il marche (premier chargement, échec), on les garde :
+    // le repli sur l'interpolation maison est alors immédiat.
+    const bool vfg_only = settings.interp == InterpMode::Nvvfx && nvvfx_.vfg_ready();
     UniqueFrame& slot = acquire_slot();
     std::swap(slot.pyr, scratch_);
-    slot.has_edges = settings.frame_gen && settings.synth.hud_protect;
+    slot.has_edges = settings.frame_gen && settings.synth.hud_protect && !vfg_only;
     if (slot.has_edges) motion_.build_edges(slot.pyr, slot.edges);
     slot.has_raw = settings.compare;  // la copie brute ne sert qu'au mode comparaison
     if (slot.has_raw) {
@@ -176,7 +181,8 @@ bool Pipeline::accept(const GpuTexture& src, double time, double arrival, Unique
             interval_ = interval_ * 0.9 + dt * 0.1;
         }
         if (cut) ++info_.scene_cuts;
-        if (!cut && (settings.frame_gen || settings.flow_viz)) {
+        if (!cut) slot.prev_id = last->id;  // paire interpolable (flow maison ou VFG)
+        if (!cut && ((settings.frame_gen && !vfg_only) || settings.flow_viz)) {
             prof_.begin(ctx, GpuSection::Flow);
             // Prédicteurs temporels : flow de même sens de la paire précédente (mouvement ~constant).
             ID3D11ShaderResourceView* t_fwd = last->has_flow ? last->flow_fwd.srv.Get() : nullptr;
@@ -185,7 +191,6 @@ bool Pipeline::accept(const GpuTexture& src, double time, double arrival, Unique
             motion_.estimate_flow(slot.pyr, last->pyr, t_bwd, 1.0f, slot.flow_bwd);
             prof_.end(ctx, GpuSection::Flow);
             slot.has_flow = true;
-            slot.prev_id  = last->id;
         }
     }
     info_.interval_ms = float(interval_ * 1000.0);
@@ -219,6 +224,7 @@ bool Pipeline::render(ID3D11RenderTargetView* rtv, const D3D11_VIEWPORT& vp, dou
     for (const auto& u : ring_)
         if (u.valid) fr[n++] = &u;
     info_.interpolating = false;
+    info_.interp_nvvfx  = false;
     if (n == 0) return false;
     std::sort(fr.begin(), fr.begin() + ptrdiff_t(n), [](auto* a, auto* b) { return a->time < b->time; });
     const UniqueFrame* latest = fr[n - 1];
@@ -236,6 +242,12 @@ bool Pipeline::render(ID3D11RenderTargetView* rtv, const D3D11_VIEWPORT& vp, dou
     } else {
         // On affiche le passé (maintenant - retard) pour toujours avoir la frame suivante B en main.
         const double target = display_time - delay;
+        // VFG (SDK NVIDIA) : false si indisponible ou en échec -> l'appelant se replie sur le flow maison.
+        auto try_vfg = [&](const UniqueFrame& fa, const UniqueFrame& fb, float tt) {
+            vfg_out_.ensure(d3d_.device(), output_.width, output_.height, DXGI_FORMAT_B8G8R8A8_UNORM,
+                            D3D11_BIND_SHADER_RESOURCE, "vfg out");
+            return nvvfx_.interpolate(d3d_, fa.up, fa.id, fb.up, fb.id, tt, vfg_out_);
+        };
         const UniqueFrame *a = nullptr, *b = nullptr;
         for (size_t i = 0; i + 1 < n; ++i) {
             if (fr[i]->time <= target && target < fr[i + 1]->time) {
@@ -256,6 +268,17 @@ bool Pipeline::render(ID3D11RenderTargetView* rtv, const D3D11_VIEWPORT& vp, dou
                 // fantôme ou une coupure en avance ; A reste affichée jusqu'à l'instant de B.
                 ref = a;
                 comp_.blit(a->up.srv.Get());
+            } else if (settings.interp == InterpMode::Nvvfx && b->prev_id == a->id && span < 0.25 &&
+                       (t <= 0.02f || t >= 0.98f)) {
+                // Quasi sur une vraie frame : pas la peine d'appeler VFG (intervalle ouvert (0, 1)).
+                comp_.blit(ref->up.srv.Get());
+            } else if (settings.interp == InterpMode::Nvvfx && b->prev_id == a->id && span < 0.25 &&
+                       try_vfg(*a, *b, t)) {
+                // VFG (SDK NVIDIA) : écrit vfg_out_ sur le flux CUDA ; l'unmap ordonne la lecture D3D11.
+                comp_.blit(vfg_out_.srv.Get());
+                generated          = t > 0.05f && t < 0.95f;
+                info_.last_alpha   = t;
+                info_.interp_nvvfx = true;
             } else if (b->has_flow && b->prev_id == a->id && span < 0.25) {
                 comp_.synth(a->up.srv.Get(), b->up.srv.Get(), b->flow_fwd.srv.Get(), b->flow_bwd.srv.Get(), t,
                             settings.synth, b->pyr.flow_scale(), a->has_edges ? a->edges.srv.Get() : nullptr,
@@ -282,5 +305,6 @@ bool Pipeline::render(ID3D11RenderTargetView* rtv, const D3D11_VIEWPORT& vp, dou
     prof_.end(ctx, GpuSection::Compose);
 
     info_.interpolating = generated;
+    info_.vfg_status    = nvvfx_.vfg_status();  // relu après interpolate() (la chaîne peut changer)
     return generated;
 }

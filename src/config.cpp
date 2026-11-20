@@ -12,7 +12,18 @@ const wchar_t* usage_text() {
   --monitor <n>               moniteur de l'overlay (0, 1, ...)
   --capturable                l'overlay reste visible des captures d'écran
                               (par défaut il en est exclu)
-  --upscale off|bicubic|vsr   méthode d'upscale (défaut : vsr)
+  --upscale off|bicubic|vsr|nvvfx
+                              méthode d'upscale (défaut : vsr) ; nvvfx = VSR du
+                              NVIDIA Video Effects SDK (build RPENHANCE_NVVFX),
+                              repli sur vsr s'il est indisponible
+  --interp flow|nvvfx         interpolation : flow maison (défaut) ou Video Frame
+                              Generation du SDK NVIDIA (Ada/Blackwell, pilote
+                              >= 570.65), repli sur flow s'il est indisponible
+  --nvvfx-dir <dossier>       racine du NVIDIA VFX SDK Core (défaut : NVVFX_SDK_DIR,
+                              VFXSDK_ROOT, <exe>\nvvfx-sdk, dossier de compilation)
+  --nvvfx-models <dossier>    dossier des modèles du SDK (défaut : celui du SDK)
+  --vfg-mode low|medium|high  modèle VFG (défaut : medium)
+  --nvvfx-vsr-mode <0..4>     mode VSR du SDK : 0 bicubic .. 4 ultra (défaut : 3)
   --sharpness <0..1>          netteté du mode bicubic (défaut : 0.35)
   --no-fg                     désactive la frame generation
   --dup-threshold <x>         seuil de base de détection des doublons (défaut : 1.2)
@@ -83,7 +94,24 @@ Config parse_command_line() {
             if (v == L"off") c.upscale = UpscaleMode::Off;
             else if (v == L"bicubic") c.upscale = UpscaleMode::Bicubic;
             else if (v == L"vsr") c.upscale = UpscaleMode::Vsr;
-            else throw std::invalid_argument("--upscale attend off, bicubic ou vsr");
+            else if (v == L"nvvfx") c.upscale = UpscaleMode::Nvvfx;
+            else throw std::invalid_argument("--upscale attend off, bicubic, vsr ou nvvfx");
+        }
+        else if (s == L"--interp") {
+            auto v = to_lower(value(i));
+            if (v == L"flow") c.interp = InterpMode::Flow;
+            else if (v == L"nvvfx") c.interp = InterpMode::Nvvfx;
+            else throw std::invalid_argument("--interp attend flow ou nvvfx");
+        }
+        else if (s == L"--nvvfx-dir") c.nvvfx_dir = value(i);
+        else if (s == L"--nvvfx-models") c.nvvfx_models = value(i);
+        else if (s == L"--nvvfx-vsr-mode") c.nvvfx_vsr_mode = int(number(i));
+        else if (s == L"--vfg-mode") {
+            auto v = to_lower(value(i));
+            if (v == L"low") c.vfg_mode = 0;
+            else if (v == L"medium") c.vfg_mode = 1;
+            else if (v == L"high") c.vfg_mode = 2;
+            else throw std::invalid_argument("--vfg-mode attend low, medium ou high");
         }
         else if (!s.empty() && s[0] == L'-') throw std::invalid_argument("option inconnue : " + narrow(s));
         else c.window = s;
@@ -93,5 +121,6 @@ Config parse_command_line() {
     c.dup_threshold = std::clamp(c.dup_threshold, 0.0f, 50.0f);
     c.delay_scale   = std::clamp(c.delay_scale, 1.0f, 3.0f);
     c.flow_scale    = std::clamp(c.flow_scale, 0.5f, 1.0f);
+    c.nvvfx_vsr_mode = std::clamp(c.nvvfx_vsr_mode, 0, 4);  // modes d'upscale du guide VSR (0..4)
     return c;
 }

@@ -154,7 +154,7 @@ void App::on_hotkey(int id) {
     auto& s = pipe_->settings;
     switch (id) {
     case kHkStats: overlay_.visible = !overlay_.visible; break;
-    case kHkUpscale: s.upscale = UpscaleMode((int(s.upscale) + 1) % 3); break;
+    case kHkUpscale: s.upscale = UpscaleMode((int(s.upscale) + 1) % (NvvfxBackend::compiled_in() ? 4 : 3)); break;
     case kHkFrameGen: s.frame_gen = !s.frame_gen; break;
     case kHkCompare: s.compare = !s.compare; break;
     case kHkFlow: s.flow_viz = !s.flow_viz; break;
@@ -199,6 +199,7 @@ int App::run() {
     pipe_->init();
     auto& s         = pipe_->settings;
     s.upscale       = cfg_.upscale;
+    s.interp        = cfg_.interp;
     s.sharpness     = cfg_.sharpness;
     s.frame_gen     = cfg_.frame_gen;
     s.dup_threshold = cfg_.dup_threshold;
@@ -207,6 +208,22 @@ int App::run() {
     s.synth.hud_protect = cfg_.hud_protect;
     s.delay_scale   = cfg_.delay_scale;
     s.flow_scale    = cfg_.flow_scale;
+
+    NvvfxOptions nv;
+    nv.sdk_dir   = cfg_.nvvfx_dir;
+    nv.model_dir = cfg_.nvvfx_models;
+    nv.vfg_mode  = uint32_t(cfg_.vfg_mode);
+    nv.vsr_mode  = uint32_t(cfg_.nvvfx_vsr_mode);
+    pipe_->configure_nvvfx(nv);
+    if (cfg_.interp == InterpMode::Nvvfx || cfg_.upscale == UpscaleMode::Nvvfx) {
+        if (NvvfxBackend::compiled_in())
+            log_msg("NVIDIA VFX demandé (%s%s) : SDK chargé au premier usage, repli automatique en cas d'échec",
+                    cfg_.interp == InterpMode::Nvvfx ? "--interp nvvfx " : "",
+                    cfg_.upscale == UpscaleMode::Nvvfx ? "--upscale nvvfx" : "");
+        else
+            log_msg("NVIDIA VFX demandé mais exe compilé sans RPENHANCE_NVVFX : repli sur le flow maison et le VSR "
+                    "du VideoProcessor");
+    }
 
     if (!open_source()) return 1;
     create_window();

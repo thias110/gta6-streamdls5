@@ -5,6 +5,12 @@ enum class UpscaleMode : int {
     Off     = 0,  // étirement bilinéaire
     Bicubic = 1,  // Catmull-Rom + netteté anti-halo (shader, tous GPU)
     Vsr     = 2,  // NVIDIA RTX Video Super Resolution via le VideoProcessor D3D11
+    Nvvfx   = 3,  // VSR du NVIDIA Video Effects SDK (option RPENHANCE_NVVFX), repli sur Vsr
+};
+
+enum class InterpMode : int {
+    Flow  = 0,  // interpolation maison (flow par blocs + synthèse)
+    Nvvfx = 1,  // Video Frame Generation du NVIDIA Video Effects SDK (option RPENHANCE_NVVFX), repli sur Flow
 };
 
 struct Config {
@@ -21,7 +27,12 @@ struct Config {
     int   monitor       = -1;     // -1 = moniteur de la fenêtre capturée
 
     UpscaleMode upscale = UpscaleMode::Vsr;
+    InterpMode  interp  = InterpMode::Flow;
     bool  frame_gen     = true;
+    std::wstring nvvfx_dir;       // racine du NVIDIA VFX SDK Core ; vide = recherche automatique
+    std::wstring nvvfx_models;    // dossier des modèles (NVVFX_MODEL_DIRECTORY) ; vide = défaut du SDK
+    int   vfg_mode      = 1;      // VFG : 0 low, 1 medium, 2 high
+    int   nvvfx_vsr_mode = 3;     // VSR du SDK : 0..4 (bicubic, low, medium, high, ultra)
     float sharpness     = 0.35f;
     float dup_threshold = 1.2f;   // différence moyenne max d'une tuile (0-255) sous laquelle une frame est un doublon
     bool  adaptive_dedupe = true; // le seuil suit le bruit de fond (dup_threshold = base) + verrou de rythme 2/3

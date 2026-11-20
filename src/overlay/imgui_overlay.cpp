@@ -83,14 +83,28 @@ void ImguiOverlay::render(ID3D11RenderTargetView* rtv, const OverlayModel& m, Pi
                     prof.ms(GpuSection::Upscale), prof.ms(GpuSection::Flow), prof.ms(GpuSection::Compose));
 
         ImGui::SeparatorText("Réglages");
+        const bool nv = NvvfxBackend::compiled_in();
         int mode = int(set.upscale);
-        ImGui::Combo("Upscale", &mode, "Off (bilinéaire)\0Bicubique + netteté\0RTX Video Super Resolution\0");
+        ImGui::Combo("Upscale", &mode,
+                     nv ? "Off (bilinéaire)\0Bicubique + netteté\0RTX Video Super Resolution\0NVIDIA VFX SDK (VSR)\0"
+                        : "Off (bilinéaire)\0Bicubique + netteté\0RTX Video Super Resolution\0");
         set.upscale = UpscaleMode(mode);
         ImGui::TextDisabled("actif : %s", Upscaler::path_name(info.upscale_path));
-        if (set.upscale == UpscaleMode::Vsr) ImGui::TextWrapped("VSR : %s", info.vsr_status);
+        if (set.upscale == UpscaleMode::Vsr || set.upscale == UpscaleMode::Nvvfx)
+            ImGui::TextWrapped("VSR : %s", info.vsr_status);
         if (set.upscale == UpscaleMode::Bicubic) ImGui::SliderFloat("Netteté", &set.sharpness, 0.0f, 1.0f);
 
         ImGui::Checkbox("Frame generation", &set.frame_gen);
+        if (nv) {
+            int im = int(set.interp);
+            ImGui::Combo("Interpolation", &im, "Flow maison\0NVIDIA VFX SDK (VFG)\0");
+            set.interp = InterpMode(im);
+            if (set.interp == InterpMode::Nvvfx) {
+                ImGui::TextDisabled("actif : %s", info.interp_nvvfx ? "VFG (SDK NVIDIA)" : "flow maison (repli)");
+                ImGui::TextWrapped("VFG : %s", info.vfg_status);
+                ImGui::TextDisabled("temps GPU de VFG non compté ci-dessus (flux CUDA)");
+            }
+        }
         ImGui::SliderFloat("Marge du retard", &set.delay_scale, 1.0f, 2.0f, "x%.2f");
         // Appliquée au relâchement : chaque changement d'échelle vide l'historique des frames.
         if (!flow_scale_editing_) flow_scale_edit_ = set.flow_scale;

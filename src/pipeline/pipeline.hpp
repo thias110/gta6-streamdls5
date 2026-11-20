@@ -9,6 +9,7 @@
 
 struct PipelineSettings {
     UpscaleMode upscale       = UpscaleMode::Vsr;
+    InterpMode  interp        = InterpMode::Flow;  // Nvvfx : VFG du SDK NVIDIA, repli sur le flow maison
     float       sharpness     = 0.35f;
     bool        frame_gen     = true;
     bool        dedupe        = true;
@@ -28,6 +29,8 @@ struct PipelineInfo {
     Size2D         capture{}, output{};
     Upscaler::Path upscale_path  = Upscaler::Path::Bilinear;
     const char*    vsr_status    = "";
+    bool           interp_nvvfx  = false;  // dernière image générée par VFG (SDK NVIDIA)
+    const char*    vfg_status    = "";
     float          last_metric   = -1.0f;
     float          dup_threshold = 0.0f;  // seuil de doublon effectivement appliqué
     int            cadence_period = 0;    // rythme verrouillé (1 nouvelle image toutes les N captures), 0 = libre
@@ -64,6 +67,9 @@ public:
     bool render(ID3D11RenderTargetView* rtv, const D3D11_VIEWPORT& vp, double now, double display_time);  // true si frame générée
     void reset_history();
 
+    // Options du backend NVIDIA VFX (dossier du SDK, modes) ; à appeler avant le premier rendu.
+    void configure_nvvfx(const NvvfxOptions& o) { nvvfx_.set_options(o); }
+
     PipelineSettings    settings;
     const PipelineInfo& info() const { return info_; }
     Compositor&         compositor() { return comp_; }
@@ -79,6 +85,7 @@ private:
         double      time = 0.0;
         LumaPyramid pyr;
         GpuTexture  raw, up, flow_fwd, flow_bwd;  // flow_fwd : précédente -> celle-ci
+        // prev_id : id de la frame unique précédente du même plan (paire interpolable), 0 sinon.
         GpuTexture  edges;                        // masque de bords (protection du HUD)
         bool        has_edges = false;
         bool        has_flow = false;
@@ -105,7 +112,9 @@ private:
     Compositor           comp_;
     MotionEngine         motion_;
     DupClassifier        dup_;
+    NvvfxBackend         nvvfx_;     // optionnel (RPENHANCE_NVVFX) ; partagé avec upscaler_
     Upscaler             upscaler_;
+    GpuTexture           vfg_out_;   // image générée par VFG, en taille de sortie
 
     std::array<UniqueFrame, kRing> ring_;
     LumaPyramid                scratch_;      // pyramide de la capture en cours / en attente

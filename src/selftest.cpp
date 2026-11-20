@@ -89,8 +89,19 @@ int run_selftest(const Config& cfg) {
     comp.init(d3d);
     MotionEngine me;
     me.init(d3d);
+    // Backend NVIDIA VFX (si compilé) : mesuré à part, n'entre pas dans le verdict OK/ÉCHEC. Résultats à
+    // usage local : vérifier la licence NVIDIA avant de publier des chiffres de VFG.
+    NvvfxBackend nvvfx;
+    {
+        NvvfxOptions o;
+        o.sdk_dir   = cfg.nvvfx_dir;
+        o.model_dir = cfg.nvvfx_models;
+        o.vfg_mode  = uint32_t(cfg.vfg_mode);
+        o.vsr_mode  = uint32_t(cfg.nvvfx_vsr_mode);
+        nvvfx.set_options(o);
+    }
     Upscaler up;
-    up.init(d3d, comp);
+    up.init(d3d, comp, &nvvfx);
     TestPattern tp;
     tp.init(d3d, comp);
     GpuProfiler prof;
@@ -192,6 +203,14 @@ int run_selftest(const Config& cfg) {
             log_msg("[vitesse x%.1f] flow-scale 0.5 : interpolation %.2f dB (1.0 : %.2f dB)", speed,
                     psnr(iGT, readback(d3d, Syn)), p_synth);
         }
+        if (NvvfxBackend::compiled_in()) {  // VFG du SDK NVIDIA sur la même paire (indicatif)
+            nvvfx.release_textures();
+            if (nvvfx.interpolate(d3d, Aup, 1, Bup, 2, 0.5f, Syn))
+                log_msg("[vitesse x%.1f] VFG NVIDIA (indicatif) : %.2f dB (flow maison %.2f dB)", speed,
+                        psnr(iGT, readback(d3d, Syn)), p_synth);
+            else
+                log_msg("[vitesse x%.1f] VFG NVIDIA indisponible : %s", speed, nvvfx.vfg_status());
+        }
         ok = ok && dedupe_ok && interp_ok && cut_ok;
 
         if (speed == 1.0f) {
@@ -232,6 +251,10 @@ int run_selftest(const Config& cfg) {
     // RTX VSR : on vérifie que la voie VideoProcessor fonctionne et que le driver accepte l'extension.
     up.run(A, out, UpscaleMode::Vsr, 0.0f);
     log_msg("Upscale VSR : voie %s ; %s", Upscaler::path_name(up.last_path()), up.vsr_status());
+    if (NvvfxBackend::compiled_in()) {
+        up.run(A, out, UpscaleMode::Nvvfx, 0.0f);
+        log_msg("Upscale nvvfx : voie %s ; %s", Upscaler::path_name(up.last_path()), up.vsr_status());
+    }
 
     log_msg("Images écrites dans %s", narrow(dir).c_str());
     log_msg(ok ? "SELFTEST OK" : "SELFTEST ÉCHEC");

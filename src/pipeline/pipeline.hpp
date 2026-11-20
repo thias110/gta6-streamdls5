@@ -4,6 +4,7 @@
 #include "../stats/frame_stats.hpp"
 #include "compositor.hpp"
 #include "dedupe.hpp"
+#include "enhancer.hpp"
 #include "motion.hpp"
 #include "upscaler.hpp"
 
@@ -26,6 +27,8 @@ struct PipelineSettings {
     bool        compare       = false;  // moitié gauche = capture brute
     bool        flow_viz      = false;
     SynthParams synth;
+    // --enhance : amélioration d'image (étage A avant l'upscale). enabled = false : chemin d'origine, inchangé.
+    enhance::Params enhance;
 };
 
 struct PipelineInfo {
@@ -48,6 +51,7 @@ struct PipelineInfo {
     bool           interpolating = false;
     uint64_t       unique_frames = 0;
     uint64_t       blocking_reads = 0;
+    bool           enhance_active = false;  // amélioration appliquée à la dernière frame unique (fondu compris)
     Size2D         flow_res{};          // résolution du niveau 0 de la pyramide (estimation du flow)  // lectures de mesure qui ont dû attendre le GPU
 };
 
@@ -125,6 +129,8 @@ private:
     DupClassifier        dup_;
     NvvfxBackend         nvvfx_;     // optionnel (RPENHANCE_NVVFX) ; partagé avec upscaler_
     Upscaler             upscaler_;
+    Enhancer             enhancer_;  // --enhance
+    enhance::Smoother    enh_smooth_;  // fondu des changements de réglage
     GpuTexture           vfg_out_;   // image générée par VFG, en taille de sortie
 
     std::array<UniqueFrame, kRing> ring_;

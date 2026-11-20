@@ -56,6 +56,8 @@ add_executable(rpenhance WIN32
     src/pipeline/dedupe.cpp
     src/pipeline/scene_cut.cpp
     src/pipeline/upscaler.cpp
+    src/pipeline/enhance_logic.cpp
+    src/pipeline/enhancer.cpp
     src/pipeline/pipeline.cpp
     src/present/swapchain.cpp
     src/overlay/imgui_overlay.cpp

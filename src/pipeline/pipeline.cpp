@@ -9,6 +9,7 @@ void Pipeline::init() {
     comp_.init(d3d_);
     motion_.init(d3d_);
     upscaler_.init(d3d_, comp_, &nvvfx_);
+    enhancer_.init(d3d_, comp_);
 }
 
 void Pipeline::reset_history() {
@@ -173,8 +174,14 @@ bool Pipeline::accept(const GpuTexture& src, double time, double arrival, Unique
         ctx->CopyResource(slot.raw.tex.Get(), src.tex.Get());
     }
 
+    // --enhance : réglages effectifs (fondu des changements). Désactivé : exactement le chemin d'origine.
+    const enhance::Params enh = enh_smooth_.update(settings.enhance, arrival);
+    info_.enhance_active      = enh.enabled;
+    const GpuTexture* up_src  = &src;
+    if (enh.enabled && enh.denoise > 0.0f) up_src = &enhancer_.denoise(src, enh.denoise);  // étage A
+
     prof_.begin(ctx, GpuSection::Upscale);
-    const GpuTexture& up = upscaler_.run(src, output_, settings.upscale, settings.sharpness);
+    const GpuTexture& up = upscaler_.run(*up_src, output_, settings.upscale, settings.sharpness);
     slot.up.ensure(dev, output_.width, output_.height, DXGI_FORMAT_B8G8R8A8_UNORM, D3D11_BIND_SHADER_RESOURCE, "up");
     ctx->CopyResource(slot.up.tex.Get(), up.tex.Get());
     prof_.end(ctx, GpuSection::Upscale);

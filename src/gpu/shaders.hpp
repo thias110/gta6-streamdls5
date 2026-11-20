@@ -88,6 +88,41 @@ float4 ps_upscale(VSOut i) : SV_Target {
 )HLSL";
 
 // ---------------------------------------------------------------------------------------------
+// --enhance, étage A (avant l'upscale) : filtre bilatéral 5x5 sur la capture (taille identique à la cible).
+// Lisse le bruit et les marches de blocs de compression (écarts de quelques niveaux) sans toucher aux vrais
+// contours (écarts de dizaines de niveaux) ; l'upscale ne les amplifie donc pas. Référence CPU et choix des
+// coefficients : enhance::denoise_ref / denoise_coeffs (src/pipeline/enhance_logic.cpp).
+inline constexpr char kDenoise[] = R"HLSL(
+Texture2D<float4> g_dn_src : register(t0);
+cbuffer DenoiseCB : register(b0) {
+    float g_dn_inv_2ss2;  // 1 / (2 sigma_s²), sigma_s en pixels
+    float g_dn_inv_2sr2;  // 1 / (2 sigma_r²), sigma_r en écart de couleur 0..1
+    float g_dn_mix;       // part du filtré dans la sortie
+    float g_dn_pad;
+};
+
+float4 ps_denoise(VSOut i) : SV_Target {
+    uint w, h;
+    g_dn_src.GetDimensions(w, h);
+    int2   m = int2(w, h) - 1;
+    int2   p = int2(i.pos.xy);
+    float3 c = g_dn_src.Load(int3(p, 0)).rgb;
+    float3 acc  = 0.0;
+    float  wsum = 0.0;
+    [unroll] for (int dy = -2; dy <= 2; ++dy) {
+        [unroll] for (int dx = -2; dx <= 2; ++dx) {
+            float3 s  = g_dn_src.Load(int3(clamp(p + int2(dx, dy), 0, m), 0)).rgb;
+            float3 d  = s - c;
+            float  wt = exp(-float(dx * dx + dy * dy) * g_dn_inv_2ss2 - dot(d, d) * (1.0 / 3.0) * g_dn_inv_2sr2);
+            acc  += s * wt;
+            wsum += wt;
+        }
+    }
+    return float4(lerp(c, acc / wsum, g_dn_mix), 1.0);
+}
+)HLSL";
+
+// ---------------------------------------------------------------------------------------------
 // Pyramide de luminance (niveau 0 = demi-résolution de la capture)
 inline constexpr char kLuma[] = R"HLSL(
 Texture2D<float4>  g_rgb  : register(t0);

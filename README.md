@@ -80,6 +80,8 @@ fenêtre Remote Play ──WGC──► recadrage zone client 16:9
   (`<cstdio>`, `<stdexcept>`) et ambiguïté `Windows::` avec C++/WinRT.
 - Dans la phase 1, la fenêtre rpenhance prenait le focus : la remote play perdait la manette.
 
+> Pour compiler et valider sur Windows pas à pas : voir [docs/GUIDE-TEST-WINDOWS.md](docs/GUIDE-TEST-WINDOWS.md).
+
 ## Compiler
 
 Prérequis : Visual Studio 2022 ou 2026 avec la charge **Développement Desktop en C++** (MSVC,

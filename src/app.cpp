@@ -190,6 +190,7 @@ int App::run() {
     s.dup_threshold = cfg_.dup_threshold;
     s.adaptive_dedupe = cfg_.adaptive_dedupe;
     s.cut.enabled     = !cfg_.simple_cuts;
+    s.synth.hud_protect = cfg_.hud_protect;
     s.delay_scale   = cfg_.delay_scale;
 
     if (!open_source()) return 1;

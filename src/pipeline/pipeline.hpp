@@ -73,6 +73,8 @@ private:
         double      time = 0.0;
         LumaPyramid pyr;
         GpuTexture  raw, up, flow_fwd, flow_bwd;  // flow_fwd : précédente -> celle-ci
+        GpuTexture  edges;                        // masque de bords (protection du HUD)
+        bool        has_edges = false;
         bool        has_flow = false;
         bool        cut_before = false;  // changement de plan entre la précédente et celle-ci : HOLD
         bool        has_raw  = false;  // copie brute (mode comparaison uniquement)

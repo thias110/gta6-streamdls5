@@ -35,6 +35,8 @@ class MotionEngine {
 public:
     void init(D3DContext& d3d);
     void build_pyramid(LumaPyramid& pyr, ID3D11ShaderResourceView* rgb, Size2D src);
+    // Masque de bords dilaté (Sobel + max 3x3) du niveau 0, pour la protection du HUD dans ps_synth.
+    void build_edges(const LumaPyramid& pyr, GpuTexture& out);
     // Lecture CPU immédiate (attend le GPU, ~0.1 ms de travail).
     DiffResult measure_difference(const LumaPyramid& a, const LumaPyramid& b);
     // Flow X -> Y en UV normalisés sur la grille de blocs 8x8 du niveau 0 (R32G32F).
@@ -45,7 +47,8 @@ public:
 private:
     D3DContext*                         d3d_ = nullptr;
     ComPtr<ID3D11ComputeShader>         cs_luma_rgb_, cs_luma_down_, cs_diff_, cs_cut_, cs_motion_, cs_propagate_,
-                                        cs_median_;
+                                        cs_median_, cs_sobel_, cs_dilate_;
+    GpuTexture                          edge_tmp_;
     ComPtr<ID3D11Buffer>                diff_buf_, diff_staging_;
     ComPtr<ID3D11UnorderedAccessView>   diff_uav_;
     std::vector<GpuTexture>             level_flow_, level_tmp_;

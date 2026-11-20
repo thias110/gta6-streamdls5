@@ -100,6 +100,8 @@ bool Pipeline::submit(const SourceFrame& f, double arrival) {
     // 2. Nouvelle frame unique : on l'ajoute à l'historique.
     UniqueFrame& slot = acquire_slot();
     std::swap(slot.pyr, scratch_);
+    slot.has_edges = settings.frame_gen && settings.synth.hud_protect;
+    if (slot.has_edges) motion_.build_edges(slot.pyr, slot.edges);
     slot.has_raw = settings.compare;  // la copie brute ne sert qu'au mode comparaison
     if (slot.has_raw) {
         slot.raw.ensure(dev, cs.width, cs.height, DXGI_FORMAT_B8G8R8A8_UNORM, D3D11_BIND_SHADER_RESOURCE, "raw");
@@ -204,7 +206,8 @@ bool Pipeline::render(ID3D11RenderTargetView* rtv, const D3D11_VIEWPORT& vp, dou
                 comp_.blit(a->up.srv.Get());
             } else if (b->has_flow && b->prev_id == a->id && span < 0.25) {
                 comp_.synth(a->up.srv.Get(), b->up.srv.Get(), b->flow_fwd.srv.Get(), b->flow_bwd.srv.Get(), t,
-                            settings.synth, b->pyr.flow_scale());
+                            settings.synth, b->pyr.flow_scale(), a->has_edges ? a->edges.srv.Get() : nullptr,
+                            b->has_edges ? b->edges.srv.Get() : nullptr);
                 generated        = t > 0.05f && t < 0.95f;  // sinon quasi identique à une vraie frame
                 info_.last_alpha = t;
             } else {

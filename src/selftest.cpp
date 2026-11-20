@@ -103,7 +103,7 @@ int run_selftest(const Config& cfg) {
     for (GpuTexture* t : {&Aup, &Bup, &GTup, &Syn, &Viz})
         t->ensure(dev, out.width, out.height, DXGI_FORMAT_B8G8R8A8_UNORM, rt, "st up");
     LumaPyramid pa, pb, pan, pfar;
-    GpuTexture  fab, fba;
+    GpuTexture  fab, fba, ea, eb;
     const D3D11_VIEWPORT vp{0.0f, 0.0f, float(out.width), float(out.height), 0.0f, 1.0f};
 
     const std::wstring dir = exe_directory() + L"selftest\\";
@@ -145,6 +145,8 @@ int run_selftest(const Config& cfg) {
 
         me.estimate_flow(pa, pb, nullptr, 1.0f, fab);
         me.estimate_flow(pb, pa, nullptr, 1.0f, fba);
+        me.build_edges(pa, ea);
+        me.build_edges(pb, eb);
 
         auto upscale_to = [&](const GpuTexture& src, GpuTexture& dst) {
             const GpuTexture& u = up.run(src, out, UpscaleMode::Bicubic, 0.0f);
@@ -154,8 +156,14 @@ int run_selftest(const Config& cfg) {
         upscale_to(B, Bup);
         upscale_to(GT, GTup);
 
+        // Sans puis avec la protection du HUD (masques de bords), pour mesurer son effet.
         comp.begin(Syn.rtv.Get(), vp);
         comp.synth(Aup.srv.Get(), Bup.srv.Get(), fab.srv.Get(), fba.srv.Get(), 0.5f, SynthParams{}, pa.flow_scale());
+        comp.end();
+        const Image iS0 = readback(d3d, Syn);
+        comp.begin(Syn.rtv.Get(), vp);
+        comp.synth(Aup.srv.Get(), Bup.srv.Get(), fab.srv.Get(), fba.srv.Get(), 0.5f, SynthParams{}, pa.flow_scale(),
+                   ea.srv.Get(), eb.srv.Get());
         comp.end();
 
         const Image iA = readback(d3d, Aup), iB = readback(d3d, Bup), iGT = readback(d3d, GTup),
@@ -166,6 +174,7 @@ int run_selftest(const Config& cfg) {
         const bool   interp_ok = p_synth > p_blend + 1.0 && p_synth > p_near + 1.0;
         log_msg("[vitesse x%.1f] PSNR frame du milieu : répétition %.2f dB, fondu %.2f dB, interpolation %.2f dB -> %s",
                 speed, p_near, p_blend, p_synth, interp_ok ? "OK" : "ÉCHEC");
+        log_msg("[vitesse x%.1f] protection du HUD : %.2f dB sans, %.2f dB avec", speed, psnr(iGT, iS0), p_synth);
         ok = ok && dedupe_ok && interp_ok && cut_ok;
 
         if (speed == 1.0f) {
@@ -192,7 +201,8 @@ int run_selftest(const Config& cfg) {
         prof.end(ctx, GpuSection::Flow);
         prof.begin(ctx, GpuSection::Compose);
         comp.begin(Syn.rtv.Get(), vp);
-        comp.synth(Aup.srv.Get(), Bup.srv.Get(), fab.srv.Get(), fba.srv.Get(), 0.5f, SynthParams{}, pa.flow_scale());
+        comp.synth(Aup.srv.Get(), Bup.srv.Get(), fab.srv.Get(), fba.srv.Get(), 0.5f, SynthParams{}, pa.flow_scale(),
+                   ea.srv.Get(), eb.srv.Get());
         comp.end();
         prof.end(ctx, GpuSection::Compose);
         prof.end_frame(ctx);

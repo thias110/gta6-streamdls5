@@ -103,6 +103,9 @@ void ImguiOverlay::render(ID3D11RenderTargetView* rtv, const OverlayModel& m, Pi
             ImGui::SliderFloat("fixe max", &set.synth.static_hi, 0.0f, 0.3f);
             ImGui::SliderFloat("désaccord min", &set.synth.err_lo, 0.0f, 0.3f);
             ImGui::SliderFloat("désaccord max", &set.synth.err_hi, 0.0f, 0.6f);
+            ImGui::Checkbox("Protéger le HUD (bords fixes)", &set.synth.hud_protect);
+            ImGui::SliderFloat("HUD : tolérance min", &set.synth.hud_lo, 0.0f, 0.2f);
+            ImGui::SliderFloat("HUD : tolérance max", &set.synth.hud_hi, 0.0f, 0.3f);
         }
         if (ImGui::CollapsingHeader("Changements de plan (avancé)")) {
             ImGui::Checkbox("Corrélation + histogramme (plans sombres)", &set.cut.enabled);

@@ -32,6 +32,8 @@ void MotionEngine::init(D3DContext& d3d) {
     cs_luma_down_ = d3d.make_cs(shaders::kLuma, "cs_luma_down");
     cs_diff_      = d3d.make_cs(shaders::kTileDiff, "cs_tile_diff");
     cs_cut_       = d3d.make_cs(shaders::kCutStats, "cs_cut_stats");
+    cs_sobel_     = d3d.make_cs(shaders::kEdges, "cs_edge_sobel");
+    cs_dilate_    = d3d.make_cs(shaders::kEdges, "cs_edge_dilate");
     cs_motion_    = d3d.make_cs(shaders::kMotion, "cs_motion_search");
     cs_propagate_ = d3d.make_cs(shaders::kMotion, "cs_motion_propagate");
     cs_median_    = d3d.make_cs(shaders::kMedian, "cs_flow_median");
@@ -84,6 +86,35 @@ void MotionEngine::build_pyramid(LumaPyramid& pyr, ID3D11ShaderResourceView* rgb
         ID3D11UnorderedAccessView* uav = dst.uav.Get();
         ctx->CSSetUnorderedAccessViews(0, 1, &uav, nullptr);
         ctx->Dispatch(div_up(dst.width, 8), div_up(dst.height, 8), 1);
+        d3d_->unbind_cs();
+    }
+}
+
+void MotionEngine::build_edges(const LumaPyramid& pyr, GpuTexture& out) {
+    if (!pyr.valid()) return;
+    auto* ctx = d3d_->ctx();
+    auto* dev = d3d_->device();
+    const GpuTexture& l0 = pyr.levels[0];
+    const UINT bind = D3D11_BIND_SHADER_RESOURCE | D3D11_BIND_UNORDERED_ACCESS;
+    edge_tmp_.ensure(dev, l0.width, l0.height, DXGI_FORMAT_R16_FLOAT, bind, "edges tmp");
+    out.ensure(dev, l0.width, l0.height, DXGI_FORMAT_R16_FLOAT, bind, "edges");
+
+    // Marche de luminance de ~16 à ~32 niveaux sur 255 (Sobel L1 = 4 x marche).
+    struct {
+        uint32_t w, h;
+        float    lo, hi;
+    } cb{l0.width, l0.height, 4.0f * 16.0f / 255.0f, 4.0f * 32.0f / 255.0f};
+    ID3D11Buffer* b = d3d_->constants(cb);
+    const std::pair<ID3D11ComputeShader*, std::pair<const GpuTexture*, GpuTexture*>> passes[] = {
+        {cs_sobel_.Get(), {&l0, &edge_tmp_}}, {cs_dilate_.Get(), {&edge_tmp_, &out}}};
+    for (const auto& [cs, io] : passes) {
+        ctx->CSSetConstantBuffers(0, 1, &b);
+        ID3D11ShaderResourceView* srv = io.first->srv.Get();
+        ctx->CSSetShaderResources(0, 1, &srv);
+        ID3D11UnorderedAccessView* uav = io.second->uav.Get();
+        ctx->CSSetUnorderedAccessViews(0, 1, &uav, nullptr);
+        ctx->CSSetShader(cs, nullptr, 0);
+        ctx->Dispatch(div_up(l0.width, 8), div_up(l0.height, 8), 1);
         d3d_->unbind_cs();
     }
 }

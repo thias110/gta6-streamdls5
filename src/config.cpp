@@ -15,6 +15,7 @@ const wchar_t* usage_text() {
   --no-fg                     désactive la frame generation
   --dup-threshold <x>         seuil de base de détection des doublons (défaut : 1.2)
   --no-adaptive-dedupe        seuil de doublon fixe, sans verrou de rythme
+  --no-hud-protect            pas de masque de bords pour garder le HUD fixe
   --simple-cuts               coupures détectées sur la seule différence moyenne
                               (sans corrélation par blocs ni histogramme)
   --delay <x>                 marge du retard d'interpolation (défaut : 1.15)
@@ -69,6 +70,7 @@ Config parse_command_line() {
         else if (s == L"--dup-threshold") c.dup_threshold = number(i);
         else if (s == L"--no-adaptive-dedupe") c.adaptive_dedupe = false;
         else if (s == L"--simple-cuts") c.simple_cuts = true;
+        else if (s == L"--no-hud-protect") c.hud_protect = false;
         else if (s == L"--delay") c.delay_scale = number(i);
         else if (s == L"--upscale") {
             auto v = to_lower(value(i));

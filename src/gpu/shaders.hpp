@@ -243,6 +243,43 @@ void cs_cut_stats(uint gi : SV_GroupIndex) {
 )HLSL";
 
 // ---------------------------------------------------------------------------------------------
+// Masque de bords pour la protection du HUD (niveau 0 de la pyramide, demi-résolution) :
+// Sobel 3x3 sur la luminance (norme L1, une marche de hauteur h donne 4h), adouci entre
+// g_edge_lo et g_edge_hi, puis dilaté (max 3x3) pour couvrir les deux côtés d'un trait.
+inline constexpr char kEdges[] = R"HLSL(
+Texture2D<float>   g_esrc : register(t0);
+RWTexture2D<float> g_edst : register(u0);
+cbuffer EdgeCB : register(b0) {
+    uint2 g_esize;
+    float g_edge_lo;
+    float g_edge_hi;
+};
+
+float eload(int2 p) { return g_esrc.Load(int3(clamp(p, 0, int2(g_esize) - 1), 0)); }
+
+[numthreads(8, 8, 1)]
+void cs_edge_sobel(uint3 id : SV_DispatchThreadID) {
+    if (id.x >= g_esize.x || id.y >= g_esize.y) return;
+    int2 p = int2(id.xy);
+    float tl = eload(p + int2(-1, -1)), tc = eload(p + int2(0, -1)), tr = eload(p + int2(1, -1));
+    float ml = eload(p + int2(-1,  0)),                                mr = eload(p + int2(1,  0));
+    float bl = eload(p + int2(-1,  1)), bc = eload(p + int2(0,  1)), br = eload(p + int2(1,  1));
+    float gx = (tr + 2.0 * mr + br) - (tl + 2.0 * ml + bl);
+    float gy = (bl + 2.0 * bc + br) - (tl + 2.0 * tc + tr);
+    g_edst[id.xy] = smoothstep(g_edge_lo, g_edge_hi, abs(gx) + abs(gy));
+}
+
+[numthreads(8, 8, 1)]
+void cs_edge_dilate(uint3 id : SV_DispatchThreadID) {
+    if (id.x >= g_esize.x || id.y >= g_esize.y) return;
+    float m = 0.0;
+    [unroll] for (int dy = -1; dy <= 1; ++dy)
+        [unroll] for (int dx = -1; dx <= 1; ++dx) m = max(m, eload(int2(id.xy) + int2(dx, dy)));
+    g_edst[id.xy] = m;
+}
+)HLSL";
+
+// ---------------------------------------------------------------------------------------------
 // Estimation de mouvement par blocs 8x8, grossier -> fin.
 // Flow en UV normalisés : X(p) ~ Y(p + flow).
 inline constexpr char kMotion[] = R"HLSL(
@@ -434,6 +471,8 @@ Texture2D<float4> g_sa  : register(t0);
 Texture2D<float4> g_sb  : register(t1);
 Texture2D<float2> g_fab : register(t2);
 Texture2D<float2> g_fba : register(t3);
+Texture2D<float>  g_ea  : register(t4);  // masques de bords dilatés de A et B (cs_edge_*), 0 si absents
+Texture2D<float>  g_eb  : register(t5);
 cbuffer SynthCB : register(b0) {
     float  g_t;
     float  g_static_lo;
@@ -442,6 +481,10 @@ cbuffer SynthCB : register(b0) {
     float  g_err_hi;
     float2 g_flow_scale;  // UV image -> UV de la grille de flow (taille / (grille * 8))
     float  g_spad;
+    float  g_hud_lo;      // près d'un bord : différence |A-B| tolérée pour garder le pixel fixe
+    float  g_hud_hi;
+    float  g_hud_on;      // 0 = protection du HUD désactivée
+    float  g_spad2;
 };
 
 float4 ps_synth(VSOut i) : SV_Target {
@@ -472,8 +515,16 @@ float4 ps_synth(VSOut i) : SV_Target {
              + abs(g_sa.SampleLevel(g_linear, uv + float2( o.x, -o.y), 0).rgb - g_sb.SampleLevel(g_linear, uv + float2( o.x, -o.y), 0).rgb)
              + abs(g_sa.SampleLevel(g_linear, uv + float2(-o.x,  o.y), 0).rgb - g_sb.SampleLevel(g_linear, uv + float2(-o.x,  o.y), 0).rgb)
              + abs(g_sa.SampleLevel(g_linear, uv + float2( o.x,  o.y), 0).rgb - g_sb.SampleLevel(g_linear, uv + float2( o.x,  o.y), 0).rgb);
-    float still = 1.0 - smoothstep(g_static_lo, g_static_hi, max3(d * 0.25));
-    float3 c    = lerp(mc, lerp(sa, sb, t), still);
+    float dmax  = max3(d * 0.25);
+    float still = 1.0 - smoothstep(g_static_lo, g_static_hi, dmax);
+    // HUD / texte fixe : près d'un bord net (dans A ou B), le bruit de compression autour des traits
+    // dépasse souvent le seuil « fixe » ci-dessus et le pixel serait entraîné par le mouvement du décor.
+    // On y tolère une différence plus grande, pondérée par la stabilité entre A et B. Sur une zone unie,
+    // seul le critère d'origine s'applique (un objet qui traverse un ciel uniforme reste interpolé).
+    float edge  = max(g_ea.SampleLevel(g_linear, uv, 0), g_eb.SampleLevel(g_linear, uv, 0));
+    float hud   = g_hud_on * edge * (1.0 - smoothstep(g_hud_lo, g_hud_hi, dmax));
+    float keep  = max(still, hud);
+    float3 c    = lerp(mc, lerp(sa, sb, t), keep);
     return float4(c, 1.0);
 }
 )HLSL";

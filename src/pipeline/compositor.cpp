@@ -28,8 +28,8 @@ void Compositor::begin(ID3D11RenderTargetView* rtv, const D3D11_VIEWPORT& vp) {
 
 void Compositor::end() {
     auto* ctx = d3d_->ctx();
-    ID3D11ShaderResourceView* nulls[4]{};
-    ctx->PSSetShaderResources(0, 4, nulls);
+    ID3D11ShaderResourceView* nulls[kMaxSrv]{};
+    ctx->PSSetShaderResources(0, kMaxSrv, nulls);
     ctx->RSSetState(rs_plain_.Get());
     ctx->OMSetRenderTargets(0, nullptr, nullptr);
 }
@@ -46,12 +46,12 @@ void Compositor::scissor(const D3D11_RECT* r) {
 
 void Compositor::draw(ID3D11PixelShader* ps, std::initializer_list<ID3D11ShaderResourceView*> srvs, ID3D11Buffer* cb) {
     auto* ctx = d3d_->ctx();
-    ID3D11ShaderResourceView* arr[4]{};
+    ID3D11ShaderResourceView* arr[kMaxSrv]{};
     UINT n = 0;
     for (auto* s : srvs) {
-        if (n < 4) arr[n++] = s;
+        if (n < kMaxSrv) arr[n++] = s;
     }
-    ctx->PSSetShaderResources(0, 4, arr);
+    ctx->PSSetShaderResources(0, kMaxSrv, arr);
     if (cb) ctx->PSSetConstantBuffers(0, 1, &cb);
     ctx->PSSetShader(ps, nullptr, 0);
     d3d_->draw_fullscreen();
@@ -60,12 +60,15 @@ void Compositor::draw(ID3D11PixelShader* ps, std::initializer_list<ID3D11ShaderR
 void Compositor::blit(ID3D11ShaderResourceView* src) { draw(blit_.Get(), {src}); }
 
 void Compositor::synth(ID3D11ShaderResourceView* a, ID3D11ShaderResourceView* b, ID3D11ShaderResourceView* flow_ab,
-                       ID3D11ShaderResourceView* flow_ba, float t, const SynthParams& p, FlowScale fs) {
+                       ID3D11ShaderResourceView* flow_ba, float t, const SynthParams& p, FlowScale fs,
+                       ID3D11ShaderResourceView* edge_a, ID3D11ShaderResourceView* edge_b) {
+    const bool hud = p.hud_protect && (edge_a || edge_b);
     struct {
         float t, slo, shi, elo, ehi, fsx, fsy, pad;
-    } cb{t, p.static_lo, p.static_hi, p.err_lo, p.err_hi, fs.x, fs.y, 0.0f};
-    static_assert(sizeof(cb) == 32);
-    draw(synth_.Get(), {a, b, flow_ab, flow_ba}, d3d_->constants(cb));
+        float hlo, hhi, hon, pad2;
+    } cb{t, p.static_lo, p.static_hi, p.err_lo, p.err_hi, fs.x, fs.y, 0.0f, p.hud_lo, p.hud_hi, hud ? 1.0f : 0.0f, 0.0f};
+    static_assert(sizeof(cb) == 48);
+    draw(synth_.Get(), {a, b, flow_ab, flow_ba, edge_a, edge_b}, d3d_->constants(cb));
 }
 
 void Compositor::flow_viz(ID3D11ShaderResourceView* img, ID3D11ShaderResourceView* flow, float scale,

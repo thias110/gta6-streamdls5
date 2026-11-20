@@ -3,3 +3,14 @@ out/
 .vs/
 *.log
 selftest/
+
+# NVIDIA Video Effects SDK : binaires, en-têtes et modèles sous licence NVIDIA, jamais versionnés
+# (installés localement par scripts/install-nvvfx.ps1).
+third_party/
+nvvfx-sdk/
+*.dll
+*.trtpkg
+*.engine
+# Secrets locaux (clé NGC...) : jamais versionnés.
+.env
+.env.*

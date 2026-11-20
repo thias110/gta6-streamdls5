@@ -111,6 +111,31 @@ Img zoomed(const Img& a, float z) {
     return b;
 }
 
+// Mire de la CI au niveau grossier (un texel ~ un bloc de 32 px) : damier de 64 px (2 texels) très
+// contrasté, texture multiplicative, vue à la position x (fractionnaire, interpolation linéaire) ;
+// un carré de k x k texels figure un objet qui bouge autrement que la caméra.
+Img mire(float x, int k) {
+    std::mt19937 g(11);
+    std::uniform_real_distribution<float> u(0.8f, 1.2f);
+    const int WW = W + 8;
+    std::vector<float> tex(size_t(WW * H));
+    for (float& t : tex) t = u(g);
+    auto at = [&](int wx, int y) {
+        const bool chk = ((wx / 2) + (y / 2)) % 2;
+        return std::clamp((chk ? 0.68f : 0.22f) * tex[size_t(y * WW + wx)], 0.0f, 1.0f);
+    };
+    const int   ix = int(x);
+    const float t  = x - float(ix);
+    Img img(size_t(W * H));
+    for (int y = 0; y < H; ++y)
+        for (int xx = 0; xx < W; ++xx) {
+            float v = (1.0f - t) * at(xx + ix, y) + t * at(xx + ix + 1, y);
+            if (k > 0 && y >= 10 && y < 10 + k && xx >= 25 && xx < 25 + k) v = 0.9f - at(xx + 5, y);
+            img[size_t(y * W + xx)] = v;
+        }
+    return img;
+}
+
 // Taux de coupures détectées sur `n` paires de plans différents : (nouveau critère, ancien seul).
 void detection_rate(const char* what, float lo, float hi, int n, double min_rate) {
     const CutParams p;
@@ -142,6 +167,48 @@ int main() {
     check("même plan, zoom x1.1", day, zoomed(day, 1.1f), false);
     check("même plan, flash (luminosité x0.8)", day, [&] { Img b = day; for (float& v : b) v *= 0.8f; return b; }(),
           false);
+    {  // Panoramique rapide, même plan (CI, selftest WARP, mire x2.5 : ~35 px entre deux images) : la
+       // différence moyenne dépasse mean_max mais la corrélation reste haute. Faux positif à éviter.
+        const Img   a = mire(0.0f, 0), b = noisy(mire(1.12f, 7), 0.02f, 9);
+        const auto  f = cut_features(cut_stats_ref(a, b));
+        const float md = mean_diff(a, b);
+        const bool  like_ci = md > CutParams{}.mean_max && std::abs(f.corr - 0.94f) < 0.02f && std::abs(f.hist - 0.24f) < 0.03f;
+        std::printf("       (diff. moyenne %.1f > %.0f, indices proches de la CI corr 0.94 / histo 0.24 : %s)\n", md,
+                    CutParams{}.mean_max, like_ci ? "oui" : "NON");
+        if (!like_ci) ++g_failures;
+        check("même plan, panoramique rapide ~35 px (mire CI x2.5)", a, b, false);
+    }
+    // Valeurs mesurées par la CI (run 44717350863), quelle que soit la différence moyenne mesurée sur GPU
+    // (non journalisée) : la frame suivante x2.5 (corr 0.94, histo 0.24) est le même plan.
+    for (float md : {41.0f, 60.0f, 90.0f}) {
+        CutFeatures f;
+        f.valid = true;
+        f.corr  = 0.94f;
+        f.hist  = 0.24f;
+        const bool cut = is_scene_cut(md, f, CutParams{});
+        char what[96];
+        std::snprintf(what, sizeof(what), "CI x2.5 frame suivante, diff. moyenne %.0f", md);
+        expect(!cut, what, f, cut);
+    }
+    // Vraie coupure x1.0 de la CI (corr 0.39, histo 0.49) : la décision ne change pas (coupure si la
+    // différence moyenne dépasse mean_max, le garde-fou ne s'applique qu'aux corrélations hautes).
+    {
+        CutFeatures f;
+        f.valid = true;
+        f.corr  = 0.39f;
+        f.hist  = 0.49f;
+        const bool cut = is_scene_cut(60.0f, f, CutParams{});
+        expect(cut, "CI x1.0 image 7 s plus loin, diff. moyenne 60", f, cut);
+    }
+    {  // Coupure entre plans de disposition proche mais de tonalité différente (corrélation haute,
+       // histogrammes éloignés, cas vu sur les plans clairs synthétiques) : le garde-fou ne s'applique pas.
+        CutFeatures f;
+        f.valid = true;
+        f.corr  = 0.90f;
+        f.hist  = 0.44f;
+        const bool cut = is_scene_cut(45.0f, f, CutParams{});
+        expect(cut, "corrélation haute, histogrammes éloignés, diff. moyenne 45", f, cut);
+    }
     check("deux écrans noirs (bruit léger)", noisy(Img(size_t(W * H), 0.01f), 0.002f, 5),
           noisy(Img(size_t(W * H), 0.01f), 0.002f, 6), false);
 

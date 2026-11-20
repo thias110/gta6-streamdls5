@@ -20,6 +20,8 @@ void Pipeline::reset_history() {
     interval_ = jitter_ = 0.0;
     lag_ = lag_jitter_ = 0.0;
     lead_ = -1.0;
+    dup_.reset();
+    info_.cadence_period = 0;
 }
 
 void Pipeline::set_output_size(Size2D s) {
@@ -68,7 +70,12 @@ bool Pipeline::submit(const SourceFrame& f, double arrival) {
         const DiffResult d = motion_.measure_difference(scratch_, last->pyr);
         if (settings.dedupe) {
             metric = d.max_tile;
-            unique = metric > settings.dup_threshold;
+            if (f.time > last->time) {  // horodatage non monotone : rejeté plus bas, sans fausser l'apprentissage
+                const auto dec = dup_.classify(metric, {settings.dup_threshold, settings.adaptive_dedupe});
+                unique               = dec.unique;
+                info_.dup_threshold  = dec.threshold;
+                info_.cadence_period = dec.period;
+            }
         }
         // Changement de plan : le flow n'a pas de sens, on évitera d'interpoler à travers.
         cut = d.mean > settings.cut_threshold;

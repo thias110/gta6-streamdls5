@@ -44,6 +44,7 @@ add_executable(rpenhance WIN32
     src/capture/test_source.cpp
     src/pipeline/compositor.cpp
     src/pipeline/motion.cpp
+    src/pipeline/dedupe.cpp
     src/pipeline/upscaler.cpp
     src/pipeline/pipeline.cpp
     src/present/swapchain.cpp
@@ -59,3 +60,9 @@ target_link_libraries(rpenhance PRIVATE
     d3d11 dxgi dxguid d3dcompiler
     dwmapi windowsapp
 )
+
+# Tests de la logique CPU (sans GPU) : ctest -C Release
+enable_testing()
+add_executable(rpenhance_tests tests/dedupe_test.cpp src/pipeline/dedupe.cpp)
+target_include_directories(rpenhance_tests PRIVATE src)
+add_test(NAME dedupe COMMAND rpenhance_tests)

@@ -24,6 +24,7 @@ struct Config {
     bool  frame_gen     = true;
     float sharpness     = 0.35f;
     float dup_threshold = 1.2f;   // différence moyenne max d'une tuile (0-255) sous laquelle une frame est un doublon
+    bool  adaptive_dedupe = true; // le seuil suit le bruit de fond (dup_threshold = base) + verrou de rythme 2/3
     float delay_scale   = 1.15f;  // marge du retard d'interpolation (x intervalle entre frames uniques)
 };
 

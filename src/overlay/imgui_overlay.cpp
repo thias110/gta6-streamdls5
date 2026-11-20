@@ -61,10 +61,18 @@ void ImguiOverlay::render(ID3D11RenderTargetView* rtv, const OverlayModel& m, Pi
         ImGui::Text("arrivée    %5.1f ms   changements de plan %llu", info.arrival_ms,
                     static_cast<unsigned long long>(info.scene_cuts));
 
+        const float thr = info.dup_threshold > 0.0f ? info.dup_threshold : set.dup_threshold;
+        if (set.dedupe && set.adaptive_dedupe) {
+            if (info.cadence_period > 0)
+                ImGui::Text("rythme     verrouillé : 1 image sur %d captures", info.cadence_period);
+            else
+                ImGui::TextDisabled("rythme     libre");
+        }
         char label[64];
-        std::snprintf(label, sizeof(label), "diff  %.2f / seuil %.2f", info.last_metric, set.dup_threshold);
+        std::snprintf(label, sizeof(label), "diff  %.2f / seuil %.2f%s", info.last_metric, thr,
+                      set.adaptive_dedupe ? " (adaptatif)" : "");
         ImGui::PlotHistogram("##metric", stats.metric_history(), FrameStatsCollector::kHistory, stats.metric_offset(),
-                             label, 0.0f, std::max(4.0f, set.dup_threshold * 3.0f), ImVec2(360, 50));
+                             label, 0.0f, std::max(4.0f, thr * 3.0f), ImVec2(360, 50));
         ImGui::PlotLines("##interval", stats.interval_history(), FrameStatsCollector::kHistory,
                          stats.interval_offset(), "intervalle frames uniques (ms)", 0.0f, 80.0f, ImVec2(360, 50));
 
@@ -83,7 +91,9 @@ void ImguiOverlay::render(ID3D11RenderTargetView* rtv, const OverlayModel& m, Pi
         ImGui::Checkbox("Frame generation", &set.frame_gen);
         ImGui::SliderFloat("Marge du retard", &set.delay_scale, 1.0f, 2.0f, "x%.2f");
         ImGui::Checkbox("Dédoublonnage", &set.dedupe);
-        ImGui::SliderFloat("Seuil doublon", &set.dup_threshold, 0.1f, 8.0f, "%.2f");
+        ImGui::Checkbox("Seuil adaptatif + rythme", &set.adaptive_dedupe);
+        ImGui::SliderFloat(set.adaptive_dedupe ? "Seuil doublon (base)" : "Seuil doublon", &set.dup_threshold, 0.1f,
+                           8.0f, "%.2f");
         ImGui::Checkbox("Comparer avant | après", &set.compare);
         ImGui::SameLine();
         ImGui::Checkbox("Voir le flow", &set.flow_viz);

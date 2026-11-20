@@ -25,8 +25,13 @@ fenêtre Remote Play ──WGC──► recadrage zone client 16:9
 
 - **Capture** : Windows Graphics Capture d'une fenêtre, zéro copie CPU. Fonctionne même si la
   fenêtre est cachée derrière l'overlay (pas si elle est minimisée).
-- **Dédoublonnage** : différence moyenne par tuile sur la luminance ¼ de résolution. Le seuil ignore
-  le bruit de réencodage. Les doublons ne sont ni upscalés ni interpolés.
+- **Dédoublonnage** : différence moyenne par tuile sur la luminance ¼ de résolution. Par défaut le
+  seuil est **adaptatif** : sur les 64 dernières captures, les répétitions (bruit de réencodage) et
+  les vraies images forment deux populations ; le seuil glisse entre les deux (borné entre ¼ et 4×
+  `--dup-threshold`) et revient à la base quand il n'y a qu'une population (contenu 60 fps, image
+  fixe). Un **verrou de rythme** reconnaît le schéma A A B B (jeu à 30 fps dans un flux à 60, ou 1
+  sur 3) et ne tranche que les mesures ambiguës. `--no-adaptive-dedupe` rétablit le seuil fixe. Les
+  doublons ne sont ni upscalés ni interpolés.
 - **Upscale**
   - `vsr` : **NVIDIA RTX Video Super Resolution** via le VideoProcessor D3D11 (la même voie que
     Chrome/VLC/mpv), pas de SDK à télécharger. Il faut activer *Super Resolution* dans
@@ -84,7 +89,8 @@ Options : `rpenhance.exe --help`. Les plus utiles :
 |---|---|
 | `--upscale off\|bicubic\|vsr` | méthode d'upscale (défaut `vsr`) |
 | `--no-fg` | pas d'interpolation : latence minimale, VRR/tearing autorisé |
-| `--dup-threshold 1.2` | à monter si des doublons passent pour des frames uniques |
+| `--dup-threshold 1.2` | seuil de base des doublons (seuil fixe avec `--no-adaptive-dedupe`) |
+| `--no-adaptive-dedupe` | désactive le seuil adaptatif et le verrou de rythme |
 | `--delay 1.15` | marge du retard ; à monter si l'image saccade quand le réseau varie |
 | `--windowed` | fenêtre classique au lieu de l'overlay |
 | `--monitor 1` | overlay sur un autre écran |
@@ -116,6 +122,12 @@ Coût GPU : ~2,6 ms par frame unique (flow aller + retour depuis une source 1080
 affichée.
 
 ## Limites connues
+
+- Les modifications de la branche `feat/robustesse-qualite` (seuil adaptatif, coupures, HUD, lecture
+  GPU asynchrone, `--flow-scale`...) ont été écrites sans compilateur MSVC ni GPU : seules la syntaxe
+  (g++ avec en-têtes Windows factices, dxc pour le HLSL) et la logique CPU du dédoublonnage
+  (`tests/dedupe_test.cpp`) ont été vérifiées. À compiler et valider sur Windows (`--selftest`,
+  `--test-pattern`) avant usage.
 
 - La latence : voir l'avertissement en haut. Coupe la frame generation (Ctrl+Alt+F) pour viser.
 - L'interpolation par blocs bave sur les rotations rapides et les objets très fins ; les zones en

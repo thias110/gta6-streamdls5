@@ -188,6 +188,7 @@ int App::run() {
     s.sharpness     = cfg_.sharpness;
     s.frame_gen     = cfg_.frame_gen;
     s.dup_threshold = cfg_.dup_threshold;
+    s.adaptive_dedupe = cfg_.adaptive_dedupe;
     s.delay_scale   = cfg_.delay_scale;
 
     if (!open_source()) return 1;

@@ -3,6 +3,7 @@
 #include "../gpu/profiler.hpp"
 #include "../stats/frame_stats.hpp"
 #include "compositor.hpp"
+#include "dedupe.hpp"
 #include "motion.hpp"
 #include "upscaler.hpp"
 
@@ -11,7 +12,8 @@ struct PipelineSettings {
     float       sharpness     = 0.35f;
     bool        frame_gen     = true;
     bool        dedupe        = true;
-    float       dup_threshold = 1.2f;
+    float       dup_threshold = 1.2f;   // seuil de base (fixe si adaptive_dedupe est faux)
+    bool        adaptive_dedupe = true; // seuil qui suit le bruit de fond + verrou de rythme 2/3
     float       delay_scale   = 1.15f;
     float       cut_threshold = 40.0f;  // différence moyenne |dY| (0-255) au-delà de laquelle on suppose un
                                         // changement de plan : pas de flow, pas d'interpolation
@@ -25,6 +27,8 @@ struct PipelineInfo {
     Upscaler::Path upscale_path  = Upscaler::Path::Bilinear;
     const char*    vsr_status    = "";
     float          last_metric   = -1.0f;
+    float          dup_threshold = 0.0f;  // seuil de doublon effectivement appliqué
+    int            cadence_period = 0;    // rythme verrouillé (1 nouvelle image toutes les N captures), 0 = libre
     float          interval_ms   = 0.0f;  // intervalle moyen entre frames uniques
     float          jitter_ms     = 0.0f;
     float          delay_ms      = 0.0f;  // retard d'affichage imposé par l'interpolation
@@ -77,6 +81,7 @@ private:
     FrameStatsCollector& stats_;
     Compositor           comp_;
     MotionEngine         motion_;
+    DupClassifier        dup_;
     Upscaler             upscaler_;
 
     std::array<UniqueFrame, kRing> ring_;

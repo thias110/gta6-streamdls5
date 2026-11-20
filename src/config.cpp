@@ -13,7 +13,8 @@ const wchar_t* usage_text() {
   --upscale off|bicubic|vsr   méthode d'upscale (défaut : vsr)
   --sharpness <0..1>          netteté du mode bicubic (défaut : 0.35)
   --no-fg                     désactive la frame generation
-  --dup-threshold <x>         seuil de détection des doublons (défaut : 1.2)
+  --dup-threshold <x>         seuil de base de détection des doublons (défaut : 1.2)
+  --no-adaptive-dedupe        seuil de doublon fixe, sans verrou de rythme
   --delay <x>                 marge du retard d'interpolation (défaut : 1.15)
   --no-crop                   ne recadre pas la capture en 16:9
   --no-tearing                pas de tearing/VRR sans frame generation
@@ -64,6 +65,7 @@ Config parse_command_line() {
         else if (s == L"--fg") c.frame_gen = true;
         else if (s == L"--sharpness") c.sharpness = number(i);
         else if (s == L"--dup-threshold") c.dup_threshold = number(i);
+        else if (s == L"--no-adaptive-dedupe") c.adaptive_dedupe = false;
         else if (s == L"--delay") c.delay_scale = number(i);
         else if (s == L"--upscale") {
             auto v = to_lower(value(i));

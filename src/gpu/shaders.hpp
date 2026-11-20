@@ -325,13 +325,29 @@ cbuffer MotionCB : register(b0) {
 #define FLAG_TEMPORAL 2u
 #define FLAG_SUBPIXEL 4u
 
+// SAD d'un bloc 8x8 : 16 GatherRed par image (2x2 texels chacun) au lieu de 64 Load.
+// Gather au coin commun des texels p et p + (1, 1) : uv = (p + 1) / taille, centre exact de
+// l'empreinte 2x2 (marge d'un demi-texel). Composantes : w = (p.x, p.y), z = (p.x+1, p.y),
+// x = (p.x, p.y+1), y = (p.x+1, p.y+1). g_point est en adressage CLAMP : chaque texel hors image est
+// borné comme clamp(p, 0, taille - 1) avec Load. Valeurs exactes (pas de filtrage) et même ordre de
+// sommation (ligne par ligne, de gauche à droite) : résultat identique à la version Load.
 float block_sad(int2 origin, int2 v) {
-    int2 hi = g_msize - 1;
     float s = 0.0;
-    [loop] for (int y = 0; y < BS; ++y) {
-        [unroll] for (int x = 0; x < BS; ++x) {
-            int2 p = origin + int2(x, y);
-            s += abs(g_mx.Load(int3(clamp(p, 0, hi), 0)) - g_my.Load(int3(clamp(p + v, 0, hi), 0)));
+    [loop] for (int y = 0; y < BS; y += 2) {
+        float4 gx[BS / 2];
+        float4 gy[BS / 2];
+        [unroll] for (int k = 0; k < BS / 2; ++k) {
+            int2 c = origin + int2(2 * k + 1, y + 1);
+            gx[k] = g_mx.GatherRed(g_point, float2(c) * g_inv_msize);
+            gy[k] = g_my.GatherRed(g_point, float2(c + v) * g_inv_msize);
+        }
+        [unroll] for (int k = 0; k < BS / 2; ++k) {
+            s += abs(gx[k].w - gy[k].w);
+            s += abs(gx[k].z - gy[k].z);
+        }
+        [unroll] for (int k = 0; k < BS / 2; ++k) {
+            s += abs(gx[k].x - gy[k].x);
+            s += abs(gx[k].y - gy[k].y);
         }
     }
     return s * (1.0 / (BS * BS));

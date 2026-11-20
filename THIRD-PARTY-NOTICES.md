@@ -58,6 +58,45 @@ NVIDIA n'est inclus dans ce dépôt ni dans les binaires de rpenhance** : ni DLL
   `NVVideoEffectsProxy.cpp`) n'est ni copié ni téléchargé : ses en-têtes (v0.7.6) ne couvrent pas
   Video Frame Generation.
 
+## SmoovPlay : format « frame tap » et émetteur de référence (MIT)
+
+Source : https://github.com/smoovplay/smoovplay — licence MIT, Copyright (c) 2026 the SmoovPlay
+authors.
+
+- `src/capture/tap_protocol.{hpp,cpp}`, `src/capture/tap_source.{hpp,cpp}`, `src/selftest_tap.cpp` :
+  lecteur du format « frame tap » version 2 écrit pour rpenhance d'après la spécification
+  `docs/frame-tap.md` de SmoovPlay (disposition de la mémoire, en-tête, slots, sessions, drapeaux,
+  couleur) et son émetteur de référence `docs/frame-tap-writer.c`.
+- `tests/tap_writer.cpp` : **copie adaptée** de `docs/frame-tap-writer.c` (ouverture du tap, début de
+  flux, écriture d'une frame, fin de flux, image de bandes mobiles), modifiée pour rpenhance (C++, NV12,
+  plusieurs sessions, attente du lecteur, image de test `src/capture/tap_pattern.hpp`).
+- Le lecteur de SmoovPlay (`framegen/tap.py`, `framegen/chiaki_tap.py`) n'a pas été repris. Le
+  patch frame tap de chiaki-ng (`chiaki_tap/`, AGPL 3.0) n'a été ni lu ni copié.
+
+```
+MIT License
+
+Copyright (c) 2026 the SmoovPlay authors
+
+Permission is hereby granted, free of charge, to any person obtaining a copy
+of this software and associated documentation files (the "Software"), to deal
+in the Software without restriction, including without limitation the rights
+to use, copy, modify, merge, publish, distribute, sublicense, and/or sell
+copies of the Software, and to permit persons to whom the Software is
+furnished to do so, subject to the following conditions:
+
+The above copyright notice and this permission notice shall be included in all
+copies or substantial portions of the Software.
+
+THE SOFTWARE IS PROVIDED "AS IS", WITHOUT WARRANTY OF ANY KIND, EXPRESS OR
+IMPLIED, INCLUDING BUT NOT LIMITED TO THE WARRANTIES OF MERCHANTABILITY,
+FITNESS FOR A PARTICULAR PURPOSE AND NONINFRINGEMENT. IN NO EVENT SHALL THE
+AUTHORS OR COPYRIGHT HOLDERS BE LIABLE FOR ANY CLAIM, DAMAGES OR OTHER
+LIABILITY, WHETHER IN AN ACTION OF CONTRACT, TORT OR OTHERWISE, ARISING FROM,
+OUT OF OR IN CONNECTION WITH THE SOFTWARE OR THE USE OR OTHER DEALINGS IN THE
+SOFTWARE.
+```
+
 ## Idées reprises (aucun code copié)
 
 - **SmoovPlay** (https://github.com/smoovplay/smoovplay, licence MIT, Copyright (c) 2026 the

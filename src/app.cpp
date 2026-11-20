@@ -1,5 +1,7 @@
 #include "app.hpp"
 
+#include "capture/mf_capture.hpp"
+#include "capture/tap_source.hpp"
 #include "capture/test_source.hpp"
 #include "capture/wgc_capture.hpp"
 
@@ -29,6 +31,7 @@ BOOL CALLBACK enum_monitor(HMONITOR m, HDC, LPRECT, LPARAM lp) {
 App::App(const Config& cfg) : cfg_(cfg) {}
 
 App::~App() {
+    audio_.stop();
     if (hotkeys_) {
         for (int id = kHkStats; id <= kHkQuit; ++id) UnregisterHotKey(hwnd_, id);
     }
@@ -38,7 +41,40 @@ App::~App() {
 
 bool App::open_source() {
     if (cfg_.test_pattern) {
-        source_      = std::make_unique<TestSource>(d3d_, pipe_->compositor());
+        // Avec --source capture : mire au profil « câble » (répétitions exactes, sans gigue), sans matériel.
+        source_ = std::make_unique<TestSource>(d3d_, pipe_->compositor(),
+                                               cfg_.capture_source() ? TestSource::Profile::Cable
+                                                                     : TestSource::Profile::RemotePlay);
+        source_name_ = source_->name();
+        return true;
+    }
+    if (cfg_.capture_source()) {
+        // Carte de capture : pas de fenêtre à chercher ni à recadrer (l'image HDMI est déjà la sortie de la
+        // console) ; la mise à l'échelle avec bandes noires éventuelles reste faite par layout().
+        auto cap = std::make_unique<MfCaptureSource>(d3d_);
+        if (!cap->start(cfg_.device, cfg_.mode, cfg_.capture_sync)) {
+            std::wstring msg = L"Carte de capture introuvable ou inutilisable";
+            msg += cfg_.device.empty() ? L"." : L" : \"" + cfg_.device + L"\".";
+            msg += L"\n\nBranche-la (USB 3), vérifie qu'elle apparaît comme périphérique vidéo, et que la PS5 a "
+                   L"HDCP désactivé (Paramètres > Système > HDMI). La cause exacte (mode, format) est dans "
+                   L"rpenhance.log.\nPériphériques vidéo vus :\n";
+            try {
+                for (const auto& n : list_capture_devices()) msg += L"  • " + n + L"\n";
+            } catch (const std::exception& e) {
+                msg += L"  (énumération impossible : " + widen(e.what()) + L")\n";
+            }
+            log_msg("%s", narrow(msg).c_str());
+            MessageBoxW(nullptr, msg.c_str(), L"rpenhance", MB_OK | MB_ICONWARNING);
+            return false;
+        }
+        source_name_ = cap->name();
+        source_      = std::move(cap);
+        return true;
+    }
+    if (cfg_.source == SourceKind::Tap) {
+        // Pas de fenêtre à chercher : la mémoire partagée est créée (ou ouverte) tout de suite et l'émetteur peut
+        // démarrer plus tard. En attendant, la boucle dort sur l'event du tap (ou le vblank) : pas d'attente active.
+        source_      = std::make_unique<TapFrameSource>(d3d_, pipe_->compositor(), cfg_.tap_name);
         source_name_ = source_->name();
         return true;
     }
@@ -94,13 +130,20 @@ void App::create_window() {
         hwnd_ = CreateWindowExW(0, wc.lpszClassName, L"rpenhance", WS_OVERLAPPEDWINDOW, mi.rcWork.left + 40,
                                 mi.rcWork.top + 40, r.right - r.left, r.bottom - r.top, nullptr, nullptr, inst, this);
         ShowWindow(hwnd_, SW_SHOW);
-    } else {
+    } else if (passive_) {
         // Overlay plein écran au-dessus de la remote play, qui garde le focus (et donc la manette).
         const RECT& m = mi.rcMonitor;
         hwnd_ = CreateWindowExW(WS_EX_TOPMOST | WS_EX_NOACTIVATE | WS_EX_TOOLWINDOW, wc.lpszClassName, L"rpenhance",
                                 WS_POPUP, m.left, m.top, m.right - m.left, m.bottom - m.top, nullptr, nullptr, inst,
                                 this);
         ShowWindow(hwnd_, SW_SHOWNOACTIVATE);
+    } else {
+        // Carte HDMI : la manette est sur la PS5, la fenêtre peut prendre le focus (plein écran sans bordure).
+        const RECT& m = mi.rcMonitor;
+        hwnd_ = CreateWindowExW(0, wc.lpszClassName, L"rpenhance", WS_POPUP, m.left, m.top, m.right - m.left,
+                                m.bottom - m.top, nullptr, nullptr, inst, this);
+        ShowWindow(hwnd_, SW_SHOW);
+        SetForegroundWindow(hwnd_);
     }
     if (!hwnd_) throw_hr(HRESULT_FROM_WIN32(GetLastError()), "CreateWindowEx");
     refresh_hz_ = query_refresh_rate();
@@ -180,7 +223,7 @@ LRESULT App::on_message(HWND h, UINT m, WPARAM w, LPARAM l) {
         return 0;
     case WM_HOTKEY: on_hotkey(int(w)); return 0;
     case WM_MOUSEACTIVATE:
-        if (!cfg_.windowed) return MA_NOACTIVATE;
+        if (passive_) return MA_NOACTIVATE;
         break;
     case WM_KEYDOWN:
         if (w == VK_ESCAPE) quit_ = true;
@@ -207,6 +250,11 @@ int App::run() {
     s.cut.enabled     = !cfg_.simple_cuts;
     s.synth.hud_protect = cfg_.hud_protect;
     s.delay_scale   = cfg_.delay_scale;
+    s.trust_source_flags = cfg_.tap_trust_flags && cfg_.source == SourceKind::Tap && !cfg_.test_pattern;
+    if (cfg_.tap_trust_flags && !s.trust_source_flags)
+        log_msg("--tap-trust-flags ignoré : il ne sert qu'avec --source tap");
+    else if (s.trust_source_flags)
+        log_msg("--tap-trust-flags : répétitions, pertes et images réparées annoncées par le tap utilisées telles quelles");
     s.flow_scale    = cfg_.flow_scale;
 
     NvvfxOptions nv;
@@ -225,7 +273,17 @@ int App::run() {
                     "du VideoProcessor");
     }
 
+    // Remote Play (wgc/tap) : overlay passif qui laisse le focus (et la manette) à la remote play. Carte de
+    // capture : la manette est sur la console, la fenêtre plein écran peut prendre le focus.
+    passive_ = !cfg_.windowed && !cfg_.capture_source();
     if (!open_source()) return 1;
+    if (cfg_.capture_source() && !cfg_.test_pattern && cfg_.audio) {
+        try {
+            audio_.start(cfg_.audio_device, source_name_, cfg_.audio_volume);
+        } catch (const std::exception& e) {
+            log_msg("Son : relais impossible (%s) ; l'image continue sans le son.", e.what());
+        }
+    }
     create_window();
     sc_.create(d3d_, hwnd_, client_size());
     overlay_.init(hwnd_, d3d_, float(GetDpiForWindow(hwnd_)) / 96.0f);
@@ -238,7 +296,7 @@ int App::run() {
     for (auto [id, vk] : keys) {
         if (!RegisterHotKey(hwnd_, id, mods, vk)) log_msg("Raccourci Ctrl+Alt+%c déjà pris par une autre appli", char(vk));
     }
-    if (!cfg_.windowed && target_) {
+    if (passive_ && target_) {
         if (!SetForegroundWindow(target_))
             log_msg("Impossible de redonner le focus à la remote play : fais Alt+Tab dessus.");
     }
@@ -246,8 +304,17 @@ int App::run() {
     OverlayModel model;
     model.source_name  = source_name_;
     model.adapter      = d3d_.adapter_name();
-    model.overlay_mode = !cfg_.windowed;
-    log_msg("Démarré : %s, overlay %s, %.0f Hz", source_name_.c_str(), cfg_.windowed ? "non" : "oui", refresh_hz_);
+    model.overlay_mode = passive_;
+    model.hdmi         = cfg_.capture_source();
+    model.audio        = audio_.running() ? &audio_ : nullptr;
+    model.audio_volume = cfg_.audio_volume;
+    model.audio_delay  = audio_delay::describe(cfg_.audio_delay);
+    if (audio_.running())
+        log_msg("Son : retard %s (%s)", model.audio_delay.c_str(),
+                cfg_.audio_delay.mode == audio_delay::Mode::Auto
+                    ? "suit le retard ajouté par l'interpolation, 0 sans frame generation"
+                    : "fixe");
+    log_msg("Démarré : %s, overlay %s, %.0f Hz", source_name_.c_str(), passive_ ? "oui" : "non", refresh_hz_);
 
     double last_log = now_seconds();
     while (!quit_ && !overlay_.quit_requested) {
@@ -259,7 +326,9 @@ int App::run() {
         }
         if (quit_) break;
         if (!source_->alive()) {
-            log_msg("La fenêtre capturée a été fermée.");
+            log_msg(cfg_.capture_source() ? "La carte de capture a cessé d'envoyer des images (débranchée, fin de "
+                                            "flux ou conversion impossible : voir plus haut)."
+                                          : "La fenêtre capturée a été fermée.");
             break;
         }
         if (resize_pending_) {
@@ -336,6 +405,15 @@ int App::run() {
         const double display   = fg ? sc_.next_vblank(now, 1.0 / std::max(1.0, refresh_hz_)) : now;
         const bool   generated = pipe_->render(sc_.rtv(), vp, now, display);
 
+        // Son de la carte : retardé d'autant que l'interpolation retarde l'image (--audio-delay auto), sinon il
+        // sortirait en avance ; lissé par audio_tracker_ (sauts >= 8 ms, au plus toutes les 0,5 s).
+        if (audio_.running()) {
+            const auto& pi     = pipe_->info();
+            const bool  fg_now = pipe_->settings.frame_gen && pi.interval_ms > 0.0f;
+            const float want   = audio_delay::target_ms(cfg_.audio_delay, fg_now, pi.delay_ms, pi.arrival_ms);
+            audio_.set_delay_ms(audio_tracker_.update(want, now));
+        }
+
         model.refresh_hz = refresh_hz_;
         overlay_.render(sc_.rtv(), model, *pipe_, stats_, prof_, now);
 
@@ -352,6 +430,13 @@ int App::run() {
                     st.captured_fps, st.unique_fps, st.present_fps, st.generated_pct, info.capture.width,
                     info.capture.height, info.output.width, info.output.height,
                     Upscaler::path_name(info.upscale_path), info.delay_ms, prof_.ms(GpuSection::Flow));
+            if (audio_.running())
+                log_msg("son : %.1f ms en tampon, retard %.0f ms (%s, en attente %.0f ms) | dérive %+.0f ppm | "
+                        "%llu trames relayées, %llu jetées",
+                        audio_.buffered_ms(), audio_.delay_ms(), audio_delay::describe(cfg_.audio_delay).c_str(),
+                        audio_.applied_delay_ms(), double(audio_.drift_ppm()),
+                        static_cast<unsigned long long>(audio_.frames_relayed()),
+                        static_cast<unsigned long long>(audio_.frames_dropped()));
         }
     }
     return 0;

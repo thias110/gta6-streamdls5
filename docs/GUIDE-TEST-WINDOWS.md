@@ -48,8 +48,10 @@ ctest -C Release --output-on-failure
 cd ..
 ```
 
-Résultat attendu : 2 tests réussis (`dedupe`, `scene_cut`). Ces tests couvrent le dédoublonnage et la
-détection de coupure de scène, mais pas le rendu.
+Résultat attendu : tous les tests réussis (`dedupe`, `scene_cut`, `tap_protocol`, `capture_logic`,
+`audio_delay`). Ils couvrent le dédoublonnage, la détection de coupure de scène, le protocole du frame
+tap, la logique de la carte de capture (horodatage, choix du mode/format/périphérique, doublons sur un
+signal câble) et le retard du son relayé, mais pas le rendu ni une vraie carte.
 
 ## 4. Test d'auto-vérification et mire synthétique (GPU, sans PS5)
 
@@ -94,6 +96,78 @@ Ce qu'il faut regarder, et noter :
 - **Latence :** sans caméra haute vitesse, au moins un test « à la main » : `--no-fg` contre FG
   active, en visant.
 - Le journal est dans `build\Release\rpenhance.log`.
+
+## 5 bis. Carte de capture HDMI (branche `feat/hdmi-merge`)
+
+But : vérifier que rpenhance marche aussi bien avec la PS5 branchée sur une carte de capture qu'avec la
+Remote Play, **sans régression** de la Remote Play. Rien de ceci n'a été testé sur une vraie carte.
+
+**0. Sans carte (à faire en premier)**
+
+```powershell
+.\build\Release\rpenhance.exe --source capture --test-pattern
+```
+
+Fenêtre plein écran qui prend le focus (Échap quitte), mire « profil câble ». Dans l'overlay :
+`capturé ~60`, `unique ~30`, seuil de doublon autour de 0.4, rythme 2 verrouillé, aucune coupure de
+plan. Puis refais l'étape 5 (Remote Play, `--source wgc` par défaut) pour vérifier que rien n'a changé :
+overlay passif, la manette reste sur la Remote Play, seuil de base 1.2.
+
+**1. Lister les appareils**
+
+PS5 : **Paramètres > Système > HDMI > Activer HDCP : désactivé**. Branche la carte (USB 3), puis :
+
+```powershell
+.\build\Release\rpenhance.exe --list-devices
+.\build\Release\rpenhance.exe --list-devices --source capture        # + modes natifs de la carte retenue
+.\build\Release\rpenhance.exe --list-devices --device "Elgato"       # + modes natifs de cette carte
+```
+
+À noter : le nom exact de la carte vidéo, celui de son entrée audio, et la liste des modes (taille,
+fréquence, format NV12/YUY2/MJPEG...).
+
+**2. Lancer**
+
+```powershell
+.\build\Release\rpenhance.exe --source capture                       # ou --hdmi
+.\build\Release\rpenhance.exe --source capture --mode 1920x1080@60   # pour forcer un mode
+Get-Content .\build\Release\rpenhance.log
+```
+
+Dans le journal, relève : `mode choisi …, sortie NV12|RGB32`, `images livrées sur le GPU (zéro copie)` ou
+`en mémoire système (1 copie)`, `horodatage = …` (horloge QPC du pilote, horodatage MF recalé, ou
+arrivée), `conversion NV12 … (BT.601/709, plage …)`, et la ligne `Son : "…" -> sortie par défaut`.
+En cas d'échec, copie le message complet (boîte de dialogue et journal).
+
+**3. Vérifier l'image**
+
+- Couleurs : comparer avec la TV branchée sur la recopie HDMI (ni délavées ni écrasées : sinon noter la
+  ligne `conversion NV12 …` et le réglage « Gamme RVB » de la PS5).
+- Pas de bandes noires inutiles, pas de recadrage (l'image doit être complète, HUD compris).
+- Jeu à 30 fps : overlay `capturé ~60`, `unique ~30`, rythme 2 ; image fluide avec FG.
+- Débrancher l'USB en cours de route : rpenhance doit s'arrêter proprement (« La carte de capture a
+  cessé d'envoyer des images » dans le journal), sans plantage.
+
+**4. Vérifier le son**
+
+- Le son sort par la sortie audio par défaut de Windows ; volume dans l'overlay.
+- Synchronisation : avec FG active, l'overlay affiche `Retard du son : N ms (auto)` ; N doit suivre
+  « retard FG » − « arrivée » et tomber à 0 après Ctrl+Alt+F (FG coupée). Juge à l'oreille sur une scène
+  avec des bruits secs (tir, porte) : si le son est en avance ou en retard, essaie `--audio-delay 20`,
+  `40`, `60`… et note la valeur qui va le mieux. `--audio-delay off` reproduit l'ancien comportement.
+- Si aucune entrée audio n'est trouvée : `--audio-device "nom"` (nom donné par `--list-devices`).
+
+**5. Comparer la latence avec la Remote Play**
+
+Même jeu, même scène, même écran. Pour chaque mode (`--source wgc` avec la Remote Play, puis
+`--source capture`), et chaque fois avec et sans `--no-fg` :
+- noter les valeurs « arrivée » et « retard FG » de l'overlay (moyennes sur ~30 s, ou les lignes du
+  journal toutes les 5 s) ;
+- au mieux, filmer manette et écran avec un téléphone en ralenti (240 fps) et compter les images entre
+  l'appui et la réaction à l'écran, sur une dizaine d'appuis.
+
+Aucun chiffre n'est donné ici à l'avance : ce sont ces mesures qui diront l'écart réel entre les deux
+modes.
 
 ## 6. Backend NVIDIA (branche `feat/nvidia-vfx`)
 

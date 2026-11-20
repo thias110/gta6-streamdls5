@@ -2,7 +2,8 @@
 
 [![windows-build](https://github.com/thias110/gta6-streamdls5/actions/workflows/windows-build.yml/badge.svg)](https://github.com/thias110/gta6-streamdls5/actions/workflows/windows-build.yml)
 
-Upscale + interpolation d'images en temps réel sur le flux **PS Remote Play / chiaki** affiché sur PC.
+Upscale + interpolation d'images en temps réel sur le flux **PS Remote Play / chiaki** affiché sur PC,
+ou sur l'image d'une **carte de capture HDMI** (PS5 branchée par câble, voir « Deux modes »).
 Même idée que Veyra, mais sans installeur opaque : tout le pipeline est ici, en C++/D3D11, lisible.
 
 > Rappel honnête : ça ne transforme pas GTA 6 PS5 en version PC. Le jeu tourne toujours sur la
@@ -102,7 +103,8 @@ compile avec MSVC sur `windows-latest` (sans SDK NVIDIA), lance `ctest` puis
 `rpenhance.exe --selftest --warp` : le selftest tourne sur WARP, le rendu logiciel D3D11, car le
 runner n'a pas de GPU. Cette étape ne bloque pas encore le job ; `rpenhance.log` et les images
 sont dans l'artefact `selftest-warp`, les PSNR dans le résumé du run. Sur WARP, les temps GPU ne
-veulent rien dire.
+veulent rien dire. Le test du frame tap (`tap_writer` + `--selftest-tap --warp`) est en revanche
+bloquant ; ses journaux sont dans `tap-logs/` du même artefact.
 
 ## Utiliser
 
@@ -132,8 +134,60 @@ Options : `rpenhance.exe --help`. Les plus utiles :
 | `--windowed` | fenêtre classique au lieu de l'overlay |
 | `--monitor 1` | overlay sur un autre écran |
 | `--capturable` | l'overlay reste visible des captures d'écran (OBS, partage) |
+| `--source wgc\|tap\|capture` | fenêtre Remote Play (défaut), frame tap, ou carte de capture HDMI (voir « Deux modes ») |
 
 Le journal est écrit dans `rpenhance.log` à côté de l'exe (stats toutes les 5 s).
+
+## Source « frame tap » (expérimental)
+
+Au lieu de capturer la fenêtre de la remote play (WGC, qui passe par le compositeur DWM et ajoute sa
+latence), rpenhance peut lire des frames **déjà décodées** qu'un autre programme dépose dans une
+mémoire partagée, au format « frame tap » **version 2** de SmoovPlay (spécification MIT :
+[docs/frame-tap.md de SmoovPlay](https://github.com/smoovplay/smoovplay/blob/main/docs/frame-tap.md)).
+
+```powershell
+.\build\Release\rpenhance.exe --source tap                       # mémoire Local\smoovplay-tap
+.\build\Release\rpenhance.exe --source tap --tap-name Local\autre  # autre nom
+```
+
+| Option | Effet |
+|---|---|
+| `--source wgc\|tap` | `wgc` (défaut, inchangé) : capture de fenêtre ; `tap` : frame tap |
+| `--tap-name NOM` | nom de la mémoire partagée (défaut `Local\smoovplay-tap`) ; l'event est `NOM-frame` |
+| `--tap-trust-flags` | le pipeline croit les métadonnées de l'émetteur (désactivé par défaut, voir plus bas) |
+| `--selftest-tap` | contrôle automatique avec `tap_writer` (voir « Tester sans PS5 ») |
+
+Ce qui est lu :
+
+- mémoire `CreateFileMappingW` de 4096 + 64 Mio créée ou ouverte (l'émetteur peut démarrer avant ou
+  après), event auto-reset `NOM-frame` attendu par la boucle (pas d'attente active) ;
+- en-tête `CFTP`, **version 2 obligatoire** : une version 1 (frames compressées H.264/H.265) est
+  refusée avec un message explicite dans le journal ; `session` suivie (nouveau flux = suivi remis à
+  zéro) ; `reader_heartbeat` écrit à chaque lecture ;
+- NV12 ou BGRA, lignes tassées. NV12 : Y et Cb/Cr envoyés au GPU (R8 / R8G8) puis convertis en BGRA
+  par shader, matrice selon `colour` (0 auto : BT.709 à partir de 720 lignes, BT.601 en dessous,
+  plage limitée ; 1 à 4 explicites), chrominance 4:2:0 interpolée (placement H.264 par défaut) ;
+- lecture sans jamais bloquer l'émetteur : la frame la plus récente seulement (les autres sont
+  sautées si rpenhance est en retard), `seq` du slot relu après la copie et frame abandonnée si le
+  slot a été réécrit entre-temps ;
+- `qpc_arrival` converti en secondes sur la même horloge QPC que le reste du pipeline : le retard
+  d'arrivée mesuré part de l'arrivée de la frame chez l'émetteur.
+
+Métadonnées des slots (`flags` : bit 0 tronquée, bit 1 répétition, bit 2 nouveau contenu ;
+`frames_lost` ; `recovered`) : toujours journalisées/exposées par la source, mais **utilisées par le
+pipeline seulement avec `--tap-trust-flags`** : répétition = doublon sans mesure ; nouveau contenu =
+image unique sans passer par le classement des doublons ; `frames_lost > 0` ou frame tronquée = pas
+d'interpolation vers ni depuis cette frame (l'image est tenue) ; `recovered` ou nouvelle session =
+historique vidé. Sans l'option, le pipeline se comporte exactement comme avec WGC.
+
+Limites :
+
+- **chiaki-ng émet aujourd'hui des frames compressées (version 1)** via son patch frame tap (AGPL) :
+  rpenhance ne les décode pas et refuse ce flux. La version 2 suppose un **autre émetteur** qui
+  dépose des frames décodées (aucun n'existe pour PS Remote Play à ce jour).
+- **Aucune frame réelle n'a été testée** : seulement l'émetteur synthétique `tests/tap_writer.cpp`.
+- Feature 8 (frames envoyées seulement quand l'image change) : pas de recalage dédié sur 60 Hz, les
+  frames sont traitées à leur arrivée. Pas de son (l'anneau `-audio` est ignoré), pas de HDR.
 
 ## Backend optionnel : NVIDIA Video Effects SDK (VFG / VSR)
 
@@ -195,6 +249,110 @@ Coût : VFG tourne en taille de sortie et une fois par image affichée qui tombe
 fréquence d'écran plus basse. Le temps GPU de VFG (flux CUDA) n'apparaît pas dans les mesures GPU de
 l'overlay.
 
+## Deux modes : Remote Play et carte de capture HDMI
+
+rpenhance applique le même pipeline (doublons, coupures, upscale, interpolation) à deux sources :
+
+```
+Mode Remote Play (défaut, --source wgc ; ou --source tap)
+  PS5 ──réseau──► PS Remote Play / chiaki (décodage) ──WGC──► recadrage 16:9 ──┐
+                                                                               ├─► pipeline ──► écran
+Mode carte de capture (--source capture, alias --hdmi)                         │
+  PS5 ──HDMI──► carte de capture ──USB──► Media Foundation ──► NV12/RGB32 ──► BGRA (VideoProcessor)
+                    │                  └─► entrée audio ──► relais WASAPI (retardé comme l'image) ──► haut-parleurs
+                    └──HDMI (recopie, optionnel) ──► TV / écran
+```
+
+| | Remote Play (`wgc`, défaut) | Carte de capture (`capture`) |
+|---|---|---|
+| Matériel | aucun | carte de capture HDMI vue par Windows comme une caméra (UVC), câble HDMI |
+| Manette | sur le PC (la remote play garde le focus, rpenhance est un overlay passif) | sur la console (rpenhance est une fenêtre plein écran qui prend le focus, Échap quitte) |
+| Image reçue | flux vidéo compressé, décodé par la remote play, bruit de réencodage | sortie HDMI de la console, sans réseau ni réencodage (sauf cartes MJPEG) |
+| Doublons | seuil de base 1.2 (bruit de réencodage) | seuil de base 0.4 (répétitions identiques au pixel) ; le seuil adaptatif et le verrou de rythme restent actifs |
+| Recadrage | zone client recadrée en 16:9 (`--no-crop` pour l'éviter) | jamais : l'image HDMI est déjà la sortie de la console ; bandes noires seulement si l'écran n'est pas au même format |
+| Son | celui de la remote play | relayé depuis l'entrée audio de la carte, retardé pour rester synchrone (`--audio-delay`) |
+| Latence | réseau + encodage/décodage de la remote play + capture WGC (compositeur DWM) + interpolation | latence propre de la carte (USB, éventuel MJPEG) + interpolation ; pas de réseau ni de remote play |
+
+Aucun chiffre de latence n'a été mesuré pour l'un ou l'autre mode. L'overlay affiche en direct le
+retard d'arrivée des images (« arrivée » : horodatage de capture → réception) et le retard imposé par
+l'interpolation (« retard FG ») : c'est ce qu'il faut comparer entre les deux modes (voir
+[docs/GUIDE-TEST-WINDOWS.md](docs/GUIDE-TEST-WINDOWS.md), « Carte de capture HDMI »). Dans les deux
+modes, l'interpolation ajoute environ un intervalle entre images uniques ; `--no-fg` la coupe.
+
+### Utiliser une carte de capture
+
+1. Sur la PS5 : **Paramètres > Système > HDMI > Activer HDCP : désactivé**, sinon la carte reçoit
+   une image noire.
+2. Branche la carte (USB 3 de préférence) et vérifie qu'elle apparaît : `rpenhance.exe --list-devices`
+   (cartes vidéo et entrées audio). `rpenhance.exe --list-devices --source capture` (ou
+   `--device "nom"`) liste aussi les **modes natifs** de la carte retenue.
+3. Lance `rpenhance.exe --source capture` (ou `--hdmi`). La carte est détectée par son nom (Elgato,
+   AVerMedia, « capture », « HDMI », « Cam Link », « Live Gamer », Magewell, « USB Video », UVC),
+   sinon `--device "nom"`. Le meilleur mode est choisi automatiquement (≥ 60 fps, puis la plus grande
+   résolution jusqu'à la 4K, puis non compressé plutôt que MJPEG) ; pour forcer : `--mode 1920x1080@60`
+   ou `--mode 1280x720` (la plus haute fréquence disponible pour cette taille). La liste des modes est aussi dans `rpenhance.log`.
+
+| Option | Effet |
+|---|---|
+| `--source capture` / `--hdmi` | carte de capture au lieu de la fenêtre Remote Play |
+| `--device "nom"` | sous-chaîne du nom de la carte (implique `--source capture`) |
+| `--mode WxH[@fps]` | mode natif à utiliser (implique `--source capture`) |
+| `--capture-sync` | lecture synchrone de la carte sur un thread dédié (ancien mode ; repli si la lecture asynchrone par défaut pose problème) |
+| `--list-devices` | cartes vidéo, entrées audio, et modes de la carte retenue avec `--source capture`/`--device` |
+| `--audio-device "nom"` | entrée audio de la carte (défaut : déduite du nom de la carte vidéo) |
+| `--audio-volume 0.8` | volume du son relayé (aussi dans l'overlay) |
+| `--audio-delay auto\|<ms>\|off` | retard du son relayé (défaut `auto`, voir ci-dessous) |
+| `--no-audio` | pas de relais (si tu écoutes via la recopie HDMI ou la prise casque de la carte) |
+| `--source capture --test-pattern` | mire au profil « câble », sans carte (voir « Tester sans PS5 ») |
+
+Ce que fait la source (`src/capture/mf_capture.cpp`) :
+
+- Media Foundation Source Reader en faible latence, avec le device D3D11 de rpenhance : la carte (ou
+  la conversion de Media Foundation) livre si possible des textures GPU (zéro copie), sinon une copie
+  depuis la mémoire système. Le format natif (NV12, YUY2, MJPEG, P010, H.264...) est converti en NV12
+  par Media Foundation ; repli sur RGB32 si le NV12 est refusé ou si le natif est déjà RGB. Le
+  VideoProcessor D3D11 produit ensuite la texture BGRA attendue par le pipeline (BT.601/709 et plage
+  limitée/pleine lues dans le type média ; à défaut BT.601 sous 720 lignes, BT.709 au-delà).
+- La lecture tourne sur un thread dédié qui ne garde que l'image la plus récente et réveille la boucle
+  par un event : ni le thread GPU ni l'interface n'attendent la carte.
+- Horodatage : instant de capture converti sur l'horloge du pipeline (QPC). Si le pilote fournit
+  `MFSampleExtension_DeviceReferenceSystemTime`, il est repris tel quel ; sinon l'horodatage Media
+  Foundation (unités de 100 ns) est recalé sur l'arrivée (plus petit décalage observé, qui suit
+  lentement une dérive d'horloge) pour effacer la gigue de livraison USB. La base utilisée est écrite
+  dans le journal. Le retard d'interpolation se cale ainsi sur l'arrivée réelle, comme en Remote Play.
+- Un jeu à 30 fps dans un signal HDMI à 60 Hz se traite comme en Remote Play : une image sur deux est
+  une répétition, reconnue par le dédoublonnage (rythme 2 verrouillé), et les coupures de plan restent
+  détectées de la même façon (`DupClassifier` et `scene_cut` ne changent pas).
+- Erreurs : pas de carte, nom introuvable, mode absent, format non convertible ou API vidéo D3D11
+  indisponible → message clair (boîte de dialogue + journal), sans crash. Carte débranchée en cours de
+  route → rpenhance s'arrête proprement avec un message dans le journal.
+
+### Pourquoi le son est retardé (`--audio-delay`)
+
+Avec la frame generation, l'image affichée n'est pas la plus récente : c'est celle de l'instant
+(maintenant − retard), le temps de disposer de l'image suivante pour interpoler entre les deux. Le son de
+la carte, s'il était relayé tel quel, sortirait donc **en avance sur l'image** d'autant. Le relais
+WASAPI garde alors les échantillons dans une file le temps voulu :
+
+- `auto` (défaut) : retard = « retard FG » − « arrivée » de l'overlay, c'est-à-dire ce que
+  l'interpolation ajoute par rapport au passthrough (le retard d'arrivée USB/pilote touche aussi le son de
+  la même carte, il n'est pas ajouté). 0 quand la frame generation est coupée (Ctrl+Alt+F suivi en
+  direct). Le retard ne bouge que par sauts d'au moins 8 ms, au plus toutes les 0,5 s : chaque changement
+  s'entend comme un petit trou (retard qui augmente) ou un petit saut (retard qui diminue).
+- `--audio-delay 40` : retard fixe en ms (0 à 250), si l'image et le son ne sont pas d'accord chez toi
+  (les latences propres de la sortie audio, de l'écran et de la carte ne sont pas mesurées).
+- `--audio-delay off` : comportement d'origine (son relayé sans retard).
+
+Hors retard voulu, la politique d'origine reste : jamais plus de 60 ms d'avance accumulée (l'excédent
+est jeté pour ne pas dériver). Le retard appliqué est affiché dans l'overlay et dans le journal.
+
+Toute carte UVC (vue par Windows comme une webcam) devrait fonctionner, c'est-à-dire la plupart des
+cartes USB récentes. D'après la branche `hdmi-capture` d'origine, image et son ont été validés avec une
+webcam USB et son micro (mêmes pilotes UVC et audio USB), pas avec une vraie carte HDMI ni une PS5. Les
+adaptations de la branche `feat/hdmi-merge` (interface `FrameSource`, horodatage, repli RGB32, retard du
+son) n'ont été vérifiées que hors Windows (voir « Limites connues »). La copie depuis la mémoire système
+(cartes qui ne livrent pas d'images sur le GPU) n'a jamais été testée.
+
 ## Tester sans PS5
 
 ```powershell
@@ -203,6 +361,14 @@ l'overlay.
 
 Mire synthétique qui imite la remote play : jeu à 30 fps dans un flux à 60 fps, gigue réseau, bruit
 de réencodage, HUD fixe.
+
+Variante « carte de capture » sans carte : `--source capture --test-pattern` (jeu à 30 fps dans un
+signal HDMI à 60 Hz, répétitions identiques au pixel, horodatages réguliers, fenêtre plein écran qui
+prend le focus comme avec une vraie carte ; pas de son).
+
+```powershell
+.\build\Release\rpenhance.exe --source capture --test-pattern
+```
 
 ```powershell
 .\build\Release\rpenhance.exe --selftest; Get-Content .\build\Release\rpenhance.log
@@ -221,7 +387,28 @@ affichée. Ces chiffres datent d'avant la branche `feat/robustesse-qualite` (mes
 masque de bords, `--flow-scale`) : à remesurer. Le selftest journalise aussi la qualité avec et sans
 protection du HUD et avec `--flow-scale 0.5`.
 
+Frame tap sans PS5 : `tap_writer` (émetteur de test, copie adaptée de l'émetteur MIT de SmoovPlay)
+envoie deux sessions de frames NV12 ou BGRA, avec arrêt puis redémarrage ; `--selftest-tap` les lit,
+relit chaque image convertie et vérifie numéro de frame, couleurs, drapeaux et sessions (code 0/1).
+
+```powershell
+Start-Process .\build\Release\rpenhance.exe '--selftest-tap','--tap-name','Local\rpenhance-tap-test'
+.\build\Release\tap_writer.exe --format nv12 --name Local\rpenhance-tap-test   # ou --format bgra
+Get-Content .\build\Release\rpenhance.log   # « SELFTEST TAP OK » attendu
+```
+
+La CI Windows lance ce test sur WARP (NV12 720p, NV12 480p, BGRA 720p) et échoue s'il ne passe pas.
+
 ## Limites connues
+
+- Carte de capture (`--source capture`, branche `feat/hdmi-merge`) : intégration de la branche
+  `hdmi-capture` adaptée à l'interface `FrameSource`, écrite sans MSVC, sans carte de capture et sans
+  PS5. Vérifié : syntaxe avec clang/llvm-mingw (en-têtes Windows de mingw-w64, pas le SDK MSVC) et la
+  logique pure (`tests/capture_logic_test.cpp`, `tests/audio_delay_test.cpp`, aussi lancés par ctest
+  dans la CI). Non vérifiés : compilation MSVC (la CI le dira), présence réelle de
+  `MFSampleExtension_DeviceReferenceSystemTime` selon les pilotes, repli RGB32, copie depuis la mémoire
+  système, synchronisation image/son à l'oreille, latence comparée à la Remote Play. Pas de HDR (P010
+  converti en NV12 8 bits), pas de désentrelacement (1080i).
 
 - Les modifications de la branche `feat/robustesse-qualite` (seuil adaptatif, coupures, HUD, lecture
   GPU asynchrone, `--flow-scale`...) ont été écrites sans compilateur MSVC ni GPU : seules la syntaxe
@@ -263,7 +450,8 @@ protection du HUD et avec `--flow-scale 0.5`.
 
 - Modèle RIFE (ONNX Runtime + DirectML ou TensorRT) à la place de l'estimateur par blocs, avec la
   même mire pour mesurer le gain.
-- Récupérer les frames décodées directement dans chiaki (moins de latence que WGC).
+- Un émetteur de frames décodées (frame tap v2) côté client remote play, pour profiter de la source
+  `--source tap` (moins de latence que WGC) ; aujourd'hui seul l'émetteur de test existe.
 - Rendre et présenter avant le travail lourd d'une nouvelle frame unique (pour ne pas rater un vblank à
   144/240 Hz) : pas fait sans mesure. Le travail lourd (upscale + flow) part souvent de `render()`
   lui-même (`resolve_pending`), pas seulement de `submit()` ; inverser l'ordre dans la boucle ajouterait

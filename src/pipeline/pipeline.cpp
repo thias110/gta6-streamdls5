@@ -71,6 +71,20 @@ bool Pipeline::submit(const SourceFrame& f, double arrival) {
         pyr_scale_ = fscale;
     }
 
+    // Métadonnées de la source (frame tap), seulement si on a choisi de les croire (--tap-trust-flags).
+    SourceHint hint;
+    if (settings.trust_source_flags && f.meta.valid) {
+        // Nouveau flux, ou image réparée après une perte : l'historique ne vaut plus rien.
+        if (f.meta.new_session || f.meta.recovered) reset_history();
+        if (f.meta.repeat) {  // répétition annoncée : doublon, sans mesure ni DupClassifier
+            info_.last_metric = -1.0f;
+            stats_.on_capture(f.time, false, -1.0f);
+            return false;
+        }
+        hint.fresh   = f.meta.fresh;
+        hint.damaged = f.meta.frames_lost > 0 || f.meta.truncated;
+    }
+
     // 1. Doublon ? (le flux remote play est à 60 fps, le jeu souvent à 30 : une frame sur deux est répétée)
     //    La mesure est lancée ici et lue plus tard (resolve_pending), quand le GPU l'a terminée : plus de
     //    Map bloquant à chaque capture. La capture est copiée car la source la réécrit au prochain poll().
@@ -85,11 +99,11 @@ bool Pipeline::submit(const SourceFrame& f, double arrival) {
         ctx->CopyResource(pending_src_.tex.Get(), src.tex.Get());
         prof_.end(ctx, GpuSection::Analyze);
         ctx->Flush();  // que le GPU commence la mesure tout de suite (lue sans attente plus tard)
-        pending_ = Pending{true, f.time, arrival, last, last->id};
+        pending_ = Pending{true, f.time, arrival, last, last->id, hint};
         return false;
     }
     prof_.end(ctx, GpuSection::Analyze);
-    return accept(src, f.time, arrival, last, nullptr);
+    return accept(src, f.time, arrival, last, nullptr, hint);
 }
 
 void Pipeline::resolve_pending(bool wait) {
@@ -102,10 +116,11 @@ void Pipeline::resolve_pending(bool wait) {
     // La référence est toujours la plus récente (rien n'est ajouté tant qu'une mesure est en attente) ;
     // par prudence on vérifie qu'elle n'a pas été recyclée.
     UniqueFrame* last = (p.ref && p.ref->valid && p.ref->id == p.ref_id) ? p.ref : nullptr;
-    accept(pending_src_, p.time, p.arrival, last, last ? &d : nullptr);
+    accept(pending_src_, p.time, p.arrival, last, last ? &d : nullptr, p.hint);
 }
 
-bool Pipeline::accept(const GpuTexture& src, double time, double arrival, UniqueFrame* last, const DiffResult* d) {
+bool Pipeline::accept(const GpuTexture& src, double time, double arrival, UniqueFrame* last, const DiffResult* d,
+                      SourceHint hint) {
     auto* ctx = d3d_.ctx();
     auto* dev = d3d_.device();
     const Size2D cs = src.size();
@@ -115,7 +130,9 @@ bool Pipeline::accept(const GpuTexture& src, double time, double arrival, Unique
     if (last && d) {
         if (settings.dedupe) {
             metric = d->max_tile;
-            if (time > last->time) {  // horodatage non monotone : rejeté plus bas, sans fausser l'apprentissage
+            if (hint.fresh) {
+                unique = true;  // nouveau contenu annoncé par la source (trust_source_flags)
+            } else if (time > last->time) {  // horodatage non monotone : rejeté plus bas, sans fausser l'apprentissage
                 const auto dec = dup_.classify(metric, {settings.dup_threshold, settings.adaptive_dedupe});
                 unique               = dec.unique;
                 info_.dup_threshold  = dec.threshold;
@@ -169,7 +186,11 @@ bool Pipeline::accept(const GpuTexture& src, double time, double arrival, Unique
     slot.prev_id  = 0;
     slot.time     = time;
     slot.has_flow = false;
-    slot.cut_before = last && cut;
+    // Frame abîmée (perte avant elle, ou tronquée), ou précédente abîmée : HOLD comme pour une coupure, sans
+    // flow ni paire interpolable. Toujours faux sans trust_source_flags (hint vide).
+    const bool hold = hint.damaged || (last && last->damaged);
+    slot.cut_before = last && (cut || hold);
+    slot.damaged    = hint.damaged;
     ++info_.unique_frames;
 
     // 3. Cadence + flow bidirectionnel avec la frame unique précédente.
@@ -181,8 +202,8 @@ bool Pipeline::accept(const GpuTexture& src, double time, double arrival, Unique
             interval_ = interval_ * 0.9 + dt * 0.1;
         }
         if (cut) ++info_.scene_cuts;
-        if (!cut) slot.prev_id = last->id;  // paire interpolable (flow maison ou VFG)
-        if (!cut && ((settings.frame_gen && !vfg_only) || settings.flow_viz)) {
+        if (!cut && !hold) slot.prev_id = last->id;  // paire interpolable (flow maison ou VFG)
+        if (!cut && !hold && ((settings.frame_gen && !vfg_only) || settings.flow_viz)) {
             prof_.begin(ctx, GpuSection::Flow);
             // Prédicteurs temporels : flow de même sens de la paire précédente (mouvement ~constant).
             ID3D11ShaderResourceView* t_fwd = last->has_flow ? last->flow_fwd.srv.Get() : nullptr;

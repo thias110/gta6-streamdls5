@@ -38,10 +38,19 @@ add_executable(rpenhance WIN32
     src/config.cpp
     src/app.cpp
     src/selftest.cpp
+    src/selftest_tap.cpp
     src/gpu/d3d_context.cpp
     src/gpu/profiler.cpp
     src/capture/wgc_capture.cpp
     src/capture/test_source.cpp
+    src/capture/tap_protocol.cpp
+    src/capture/tap_source.cpp
+    src/capture/capture_logic.cpp
+    src/capture/mf_capture.cpp
+    src/capture/audio_delay.cpp
+    src/capture/audio_sync.cpp
+    src/capture/audio_format.cpp
+    src/capture/audio_passthrough.cpp
     src/pipeline/compositor.cpp
     src/pipeline/motion.cpp
     src/pipeline/dedupe.cpp
@@ -61,6 +70,8 @@ target_link_libraries(rpenhance PRIVATE
     imgui_lib
     d3d11 dxgi dxguid d3dcompiler
     dwmapi windowsapp
+    mfplat mf mfreadwrite mfuuid  # carte de capture (Media Foundation)
+    ole32                         # COM (MMDevice/WASAPI du relais audio, CoTaskMemFree)
 )
 
 # --- Backend optionnel NVIDIA Video Effects SDK (VFG / VSR) -----------------------------------------
@@ -123,3 +134,23 @@ add_test(NAME dedupe COMMAND rpenhance_tests)
 add_executable(rpenhance_cut_tests tests/scene_cut_test.cpp src/pipeline/scene_cut.cpp)
 target_include_directories(rpenhance_cut_tests PRIVATE src)
 add_test(NAME scene_cut COMMAND rpenhance_cut_tests)
+add_executable(rpenhance_tap_tests tests/tap_protocol_test.cpp src/capture/tap_protocol.cpp)
+target_include_directories(rpenhance_tap_tests PRIVATE src)
+add_test(NAME tap_protocol COMMAND rpenhance_tap_tests)
+# Carte de capture (sans carte ni Windows) : horodatage MF, choix du mode/format/périphérique, doublons « câble ».
+add_executable(rpenhance_capture_tests tests/capture_logic_test.cpp src/capture/capture_logic.cpp src/pipeline/dedupe.cpp)
+target_include_directories(rpenhance_capture_tests PRIVATE src)
+add_test(NAME capture_logic COMMAND rpenhance_capture_tests)
+# Retard du son relayé (--audio-delay) : analyse, cible, lissage, file de trames, simulation du relais.
+add_executable(rpenhance_audio_delay_tests tests/audio_delay_test.cpp src/capture/audio_delay.cpp)
+target_include_directories(rpenhance_audio_delay_tests PRIVATE src)
+add_test(NAME audio_delay COMMAND rpenhance_audio_delay_tests)
+add_executable(rpenhance_audio_sync_tests tests/audio_sync_test.cpp src/capture/audio_sync.cpp src/capture/audio_delay.cpp
+               src/capture/audio_format.cpp)
+target_include_directories(rpenhance_audio_sync_tests PRIVATE src)
+add_test(NAME audio_sync COMMAND rpenhance_audio_sync_tests)
+
+# Émetteur de test du frame tap (copie adaptée de l'émetteur MIT de SmoovPlay) : alimente
+# `rpenhance --selftest-tap` dans la CI (voir .github/workflows/windows-build.yml). Programme console.
+add_executable(tap_writer tests/tap_writer.cpp src/capture/tap_protocol.cpp)
+target_include_directories(tap_writer PRIVATE src)

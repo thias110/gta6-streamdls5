@@ -1,4 +1,6 @@
 #pragma once
+#include "capture/audio_delay.hpp"
+#include "capture/audio_passthrough.hpp"
 #include "capture/frame_source.hpp"
 #include "config.hpp"
 #include "gpu/profiler.hpp"
@@ -32,6 +34,8 @@ private:
     std::unique_ptr<FrameSource> source_;
     Swapchain           sc_;
     ImguiOverlay        overlay_;
+    AudioPassthrough    audio_;
+    audio_delay::Tracker audio_tracker_;  // lissage du retard du son (--audio-delay)
 
     HWND        hwnd_   = nullptr;
     HWND        target_ = nullptr;
@@ -39,6 +43,7 @@ private:
     bool        quit_           = false;
     bool        resize_pending_ = false;
     bool        hotkeys_        = false;
+    bool        passive_        = false;  // overlay qui ne prend jamais le focus (mode Remote Play)
     double      refresh_hz_     = 60.0;
     std::string source_name_;
 };

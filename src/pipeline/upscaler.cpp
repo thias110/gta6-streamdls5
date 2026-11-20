@@ -17,19 +17,38 @@ const char* Upscaler::path_name(Path p) {
     case Path::Bicubic: return "bicubique + netteté";
     case Path::DriverScaler: return "scaler vidéo du driver (sans VSR)";
     case Path::Vsr: return "RTX Video Super Resolution";
+    case Path::NvvfxVsr: return "NVIDIA Video Effects SDK : Video Super Resolution";
     }
     return "?";
 }
 
-void Upscaler::init(D3DContext& d3d, Compositor& comp) {
+void Upscaler::init(D3DContext& d3d, Compositor& comp, NvvfxBackend* nvvfx) {
     d3d_        = &d3d;
     comp_       = &comp;
+    nvvfx_      = nvvfx;
     ps_upscale_ = d3d.make_ps(shaders::kUpscale, "ps_upscale");
 }
 
 const GpuTexture& Upscaler::run(const GpuTexture& src, Size2D out, UpscaleMode mode, float sharpness) {
     out_.ensure(d3d_->device(), out.width, out.height, DXGI_FORMAT_B8G8R8A8_UNORM,
                 D3D11_BIND_SHADER_RESOURCE | D3D11_BIND_RENDER_TARGET, "upscale out");
+
+    nvvfx_active_status_ = nullptr;
+    if (mode == UpscaleMode::Nvvfx) {
+        if (nvvfx_ && nvvfx_->upscale(*d3d_, src, out_)) {
+            nvvfx_active_status_   = nvvfx_->vsr_status();
+            nvvfx_fallback_logged_ = false;
+            last_path_             = Path::NvvfxVsr;
+            return out_;
+        }
+        nvvfx_active_status_ = nvvfx_ ? nvvfx_->vsr_status() : "backend NVIDIA VFX absent";
+        if (!nvvfx_fallback_logged_) {
+            log_msg("Upscale nvvfx indisponible (%s) : repli sur RTX VSR (VideoProcessor) puis bicubique",
+                    nvvfx_active_status_);
+            nvvfx_fallback_logged_ = true;
+        }
+        mode = UpscaleMode::Vsr;  // repli
+    }
 
     if (mode == UpscaleMode::Vsr && run_vsr(src)) {
         last_path_ = vsr_.ext_ok ? Path::Vsr : Path::DriverScaler;

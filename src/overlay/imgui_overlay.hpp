@@ -24,4 +24,6 @@ public:
 private:
     D3DContext* d3d_  = nullptr;
     bool        init_ = false;
+    float       flow_scale_edit_    = 1.0f;   // valeur du curseur, appliquée au relâchement
+    bool        flow_scale_editing_ = false;
 };

@@ -81,7 +81,7 @@ void write_bmp(const std::wstring& path, const Image& img) {
 int run_selftest(const Config& cfg) {
     log_msg("== rpenhance selftest ==");
     D3DContext d3d;
-    d3d.initialize(cfg.debug_layer);
+    d3d.initialize(cfg.debug_layer, cfg.warp);
     auto* dev = d3d.device();
     auto* ctx = d3d.ctx();
 
@@ -89,8 +89,19 @@ int run_selftest(const Config& cfg) {
     comp.init(d3d);
     MotionEngine me;
     me.init(d3d);
+    // Backend NVIDIA VFX (si compilé) : mesuré à part, n'entre pas dans le verdict OK/ÉCHEC. Résultats à
+    // usage local : vérifier la licence NVIDIA avant de publier des chiffres de VFG.
+    NvvfxBackend nvvfx;
+    {
+        NvvfxOptions o;
+        o.sdk_dir   = cfg.nvvfx_dir;
+        o.model_dir = cfg.nvvfx_models;
+        o.vfg_mode  = uint32_t(cfg.vfg_mode);
+        o.vsr_mode  = uint32_t(cfg.nvvfx_vsr_mode);
+        nvvfx.set_options(o);
+    }
     Upscaler up;
-    up.init(d3d, comp);
+    up.init(d3d, comp, &nvvfx);
     TestPattern tp;
     tp.init(d3d, comp);
     GpuProfiler prof;
@@ -98,12 +109,12 @@ int run_selftest(const Config& cfg) {
 
     const Size2D cap{1920, 1080}, out{2560, 1440};
     const UINT   rt = D3D11_BIND_SHADER_RESOURCE | D3D11_BIND_RENDER_TARGET;
-    GpuTexture A, B, GT, An, Aup, Bup, GTup, Syn, Viz;
-    for (GpuTexture* t : {&A, &B, &GT, &An}) t->ensure(dev, cap.width, cap.height, DXGI_FORMAT_B8G8R8A8_UNORM, rt, "st");
+    GpuTexture A, B, GT, An, Far, Aup, Bup, GTup, Syn, Viz;
+    for (GpuTexture* t : {&A, &B, &GT, &An, &Far}) t->ensure(dev, cap.width, cap.height, DXGI_FORMAT_B8G8R8A8_UNORM, rt, "st");
     for (GpuTexture* t : {&Aup, &Bup, &GTup, &Syn, &Viz})
         t->ensure(dev, out.width, out.height, DXGI_FORMAT_B8G8R8A8_UNORM, rt, "st up");
-    LumaPyramid pa, pb, pan;
-    GpuTexture  fab, fba;
+    LumaPyramid pa, pb, pan, pfar;
+    GpuTexture  fab, fba, ea, eb;
     const D3D11_VIEWPORT vp{0.0f, 0.0f, float(out.width), float(out.height), 0.0f, 1.0f};
 
     const std::wstring dir = exe_directory() + L"selftest\\";
@@ -128,8 +139,24 @@ int run_selftest(const Config& cfg) {
         log_msg("[vitesse x%.1f] diff doublon %.2f, diff nouvelle frame %.2f (seuil %.2f) -> %s", speed, dup.max_tile,
                 uni.max_tile, cfg.dup_threshold, dedupe_ok ? "OK" : "ÉCHEC");
 
-        me.estimate_flow(pa, pb, nullptr, 1.0f, fab);
-        me.estimate_flow(pb, pa, nullptr, 1.0f, fba);
+        // Coupures : la frame suivante du même plan ne doit pas en être une (vérifié). L'image 7 s plus
+        // loin n'est qu'indicative : la mire est quasi périodique (damier), sa disposition peut se ressembler.
+        tp.render(Far, t0 + 7.0, noise, 5, speed);
+        me.build_pyramid(pfar, Far.srv.Get(), cap);
+        const CutParams   cutp;
+        const CutFeatures same_f = cut_features(uni.cut);
+        const DiffResult  far_d  = me.measure_difference(pa, pfar);
+        const CutFeatures far_f  = cut_features(far_d.cut);
+        const bool same_cut = is_scene_cut(uni.mean, same_f, cutp), far_cut = is_scene_cut(far_d.mean, far_f, cutp);
+        const bool cut_ok   = !same_cut;
+        log_msg("[vitesse x%.1f] coupure : frame suivante diff. moy. %.1f corr %.2f histo %.2f -> %s (%s) ; image 7 s "
+                "plus loin diff. moy. %.1f corr %.2f histo %.2f -> %s (indicatif)",
+                speed, uni.mean, same_f.corr, same_f.hist, same_cut ? "coupure" : "même plan", cut_ok ? "OK" : "ÉCHEC",
+                far_d.mean, far_f.corr, far_f.hist, far_cut ? "coupure" : "même plan");
+
+        me.estimate_flow_pair(pa, pb, nullptr, 1.0f, fab, nullptr, 1.0f, fba);
+        me.build_edges(pa, ea);
+        me.build_edges(pb, eb);
 
         auto upscale_to = [&](const GpuTexture& src, GpuTexture& dst) {
             const GpuTexture& u = up.run(src, out, UpscaleMode::Bicubic, 0.0f);
@@ -139,8 +166,14 @@ int run_selftest(const Config& cfg) {
         upscale_to(B, Bup);
         upscale_to(GT, GTup);
 
+        // Sans puis avec la protection du HUD (masques de bords), pour mesurer son effet.
         comp.begin(Syn.rtv.Get(), vp);
-        comp.synth(Aup.srv.Get(), Bup.srv.Get(), fab.srv.Get(), fba.srv.Get(), 0.5f, SynthParams{});
+        comp.synth(Aup.srv.Get(), Bup.srv.Get(), fab.srv.Get(), fba.srv.Get(), 0.5f, SynthParams{}, pa.flow_scale());
+        comp.end();
+        const Image iS0 = readback(d3d, Syn);
+        comp.begin(Syn.rtv.Get(), vp);
+        comp.synth(Aup.srv.Get(), Bup.srv.Get(), fab.srv.Get(), fba.srv.Get(), 0.5f, SynthParams{}, pa.flow_scale(),
+                   ea.srv.Get(), eb.srv.Get());
         comp.end();
 
         const Image iA = readback(d3d, Aup), iB = readback(d3d, Bup), iGT = readback(d3d, GTup),
@@ -151,11 +184,36 @@ int run_selftest(const Config& cfg) {
         const bool   interp_ok = p_synth > p_blend + 1.0 && p_synth > p_near + 1.0;
         log_msg("[vitesse x%.1f] PSNR frame du milieu : répétition %.2f dB, fondu %.2f dB, interpolation %.2f dB -> %s",
                 speed, p_near, p_blend, p_synth, interp_ok ? "OK" : "ÉCHEC");
-        ok = ok && dedupe_ok && interp_ok;
+        log_msg("[vitesse x%.1f] protection du HUD : %.2f dB sans, %.2f dB avec", speed, psnr(iGT, iS0), p_synth);
+
+        {  // --flow-scale 0.5 (indicatif) : flow à résolution réduite, synthèse en pleine résolution.
+            LumaPyramid ha, hb;
+            GpuTexture  hfab, hfba, hea, heb;
+            me.build_pyramid(ha, A.srv.Get(), cap, 0.5f);
+            me.build_pyramid(hb, B.srv.Get(), cap, 0.5f);
+            me.estimate_flow_pair(ha, hb, nullptr, 1.0f, hfab, nullptr, 1.0f, hfba);
+            me.build_edges(ha, hea);
+            me.build_edges(hb, heb);
+            comp.begin(Syn.rtv.Get(), vp);
+            comp.synth(Aup.srv.Get(), Bup.srv.Get(), hfab.srv.Get(), hfba.srv.Get(), 0.5f, SynthParams{},
+                       ha.flow_scale(), hea.srv.Get(), heb.srv.Get());
+            comp.end();
+            log_msg("[vitesse x%.1f] flow-scale 0.5 : interpolation %.2f dB (1.0 : %.2f dB)", speed,
+                    psnr(iGT, readback(d3d, Syn)), p_synth);
+        }
+        if (NvvfxBackend::compiled_in()) {  // VFG du SDK NVIDIA sur la même paire (indicatif)
+            nvvfx.release_textures();
+            if (nvvfx.interpolate(d3d, Aup, 1, Bup, 2, 0.5f, Syn))
+                log_msg("[vitesse x%.1f] VFG NVIDIA (indicatif) : %.2f dB (flow maison %.2f dB)", speed,
+                        psnr(iGT, readback(d3d, Syn)), p_synth);
+            else
+                log_msg("[vitesse x%.1f] VFG NVIDIA indisponible : %s", speed, nvvfx.vfg_status());
+        }
+        ok = ok && dedupe_ok && interp_ok && cut_ok;
 
         if (speed == 1.0f) {
             comp.begin(Viz.rtv.Get(), vp);
-            comp.flow_viz(Aup.srv.Get(), fab.srv.Get(), 25.0f);
+            comp.flow_viz(Aup.srv.Get(), fab.srv.Get(), 25.0f, pa.flow_scale());
             comp.end();
             write_bmp(dir + L"a.bmp", iA);
             write_bmp(dir + L"b.bmp", iB);
@@ -172,12 +230,14 @@ int run_selftest(const Config& cfg) {
         me.build_pyramid(pb, B.srv.Get(), cap);
         prof.end(ctx, GpuSection::Analyze);
         prof.begin(ctx, GpuSection::Flow);
-        me.estimate_flow(pa, pb, fab.srv.Get(), 1.0f, fab);
-        me.estimate_flow(pb, pa, fab.srv.Get(), -1.0f, fba);
+        // Les deux sens dans les mêmes Dispatch (comme le pipeline). Le prédicteur du retour est le fab de
+        // l'itération précédente (avant : celui qu'on venait d'écrire) ; entrées fixes, donc équivalent.
+        me.estimate_flow_pair(pa, pb, fab.srv.Get(), 1.0f, fab, fab.srv.Get(), -1.0f, fba);
         prof.end(ctx, GpuSection::Flow);
         prof.begin(ctx, GpuSection::Compose);
         comp.begin(Syn.rtv.Get(), vp);
-        comp.synth(Aup.srv.Get(), Bup.srv.Get(), fab.srv.Get(), fba.srv.Get(), 0.5f, SynthParams{});
+        comp.synth(Aup.srv.Get(), Bup.srv.Get(), fab.srv.Get(), fba.srv.Get(), 0.5f, SynthParams{}, pa.flow_scale(),
+                   ea.srv.Get(), eb.srv.Get());
         comp.end();
         prof.end(ctx, GpuSection::Compose);
         prof.end_frame(ctx);
@@ -190,6 +250,10 @@ int run_selftest(const Config& cfg) {
     // RTX VSR : on vérifie que la voie VideoProcessor fonctionne et que le driver accepte l'extension.
     up.run(A, out, UpscaleMode::Vsr, 0.0f);
     log_msg("Upscale VSR : voie %s ; %s", Upscaler::path_name(up.last_path()), up.vsr_status());
+    if (NvvfxBackend::compiled_in()) {
+        up.run(A, out, UpscaleMode::Nvvfx, 0.0f);
+        log_msg("Upscale nvvfx : voie %s ; %s", Upscaler::path_name(up.last_path()), up.vsr_status());
+    }
 
     log_msg("Images écrites dans %s", narrow(dir).c_str());
     log_msg(ok ? "SELFTEST OK" : "SELFTEST ÉCHEC");

@@ -1,5 +1,6 @@
 #pragma once
 #include "../config.hpp"
+#include "../nvvfx/nvvfx_backend.hpp"
 #include "compositor.hpp"
 
 // Upscale de la capture vers la taille d'affichage.
@@ -8,15 +9,19 @@
 //              il faut activer "Super Resolution" dans NVIDIA App > Vidéo.
 //  - Bicubic : Catmull-Rom + netteté anti-halo (shader, tous GPU)
 //  - Off     : bilinéaire
+//  - Nvvfx   : VSR du NVIDIA Video Effects SDK (build RPENHANCE_NVVFX, SDK installé) ; en cas d'échec
+//              (SDK absent, GPU/feature non supportés...) repli sur Vsr puis sur Bicubic.
 class Upscaler {
 public:
-    enum class Path { Bilinear, Bicubic, DriverScaler, Vsr };
+    enum class Path { Bilinear, Bicubic, DriverScaler, Vsr, NvvfxVsr };
 
-    void init(D3DContext& d3d, Compositor& comp);
+    // `nvvfx` : backend partagé avec le pipeline (nullptr = mode Nvvfx traité comme Vsr).
+    void init(D3DContext& d3d, Compositor& comp, NvvfxBackend* nvvfx = nullptr);
     const GpuTexture& run(const GpuTexture& src, Size2D out, UpscaleMode mode, float sharpness);
 
     Path        last_path() const { return last_path_; }
-    const char* vsr_status() const { return vsr_status_; }
+    // État de la voie demandée : backend NVIDIA VFX en mode Nvvfx, VideoProcessor sinon.
+    const char* vsr_status() const { return nvvfx_active_status_ ? nvvfx_active_status_ : vsr_status_; }
     static const char* path_name(Path p);
 
 private:
@@ -38,6 +43,9 @@ private:
 
     D3DContext*               d3d_  = nullptr;
     Compositor*               comp_ = nullptr;
+    NvvfxBackend*             nvvfx_ = nullptr;
+    const char*               nvvfx_active_status_ = nullptr;  // non nul quand le mode Nvvfx est demandé
+    bool                      nvvfx_fallback_logged_ = false;
     ComPtr<ID3D11PixelShader> ps_upscale_;
     GpuTexture                out_;
     Vsr                       vsr_;

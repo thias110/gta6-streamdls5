@@ -44,11 +44,14 @@ add_executable(rpenhance WIN32
     src/capture/test_source.cpp
     src/pipeline/compositor.cpp
     src/pipeline/motion.cpp
+    src/pipeline/dedupe.cpp
+    src/pipeline/scene_cut.cpp
     src/pipeline/upscaler.cpp
     src/pipeline/pipeline.cpp
     src/present/swapchain.cpp
     src/overlay/imgui_overlay.cpp
     src/stats/frame_stats.cpp
+    src/nvvfx/nvvfx_backend.cpp
     src/rpenhance.manifest
 )
 
@@ -59,3 +62,64 @@ target_link_libraries(rpenhance PRIVATE
     d3d11 dxgi dxguid d3dcompiler
     dwmapi windowsapp
 )
+
+# --- Backend optionnel NVIDIA Video Effects SDK (VFG / VSR) -----------------------------------------
+# OFF par défaut. Avec ON, seuls les EN-TÊTES du VFX SDK Core installé localement sont lus à la
+# compilation (types et chaînes de sélecteurs) ; aucune bibliothèque NVIDIA n'est liée : les DLL sont
+# chargées à l'exécution (LoadLibrary), l'exe démarre sans elles et se replie sur le pipeline actuel.
+# Rien de NVIDIA n'est copié dans le dépôt ni dans build/ : voir scripts/install-nvvfx.ps1 (NGC).
+# Le wrapper MIT NVIDIA-Maxine/Maxine-VFX-SDK (v0.7.6) n'est pas utilisé : ses en-têtes ne connaissent
+# ni VFG ni les sélecteurs du SDK 1.3 (et nomment autrement certains effets).
+option(RPENHANCE_NVVFX "Backend optionnel NVIDIA Video Effects SDK (--interp nvvfx, --upscale nvvfx)" OFF)
+if(RPENHANCE_NVVFX)
+    if(DEFINED ENV{NVVFX_SDK_DIR})
+        set(_nvvfx_default "$ENV{NVVFX_SDK_DIR}")
+    elseif(DEFINED ENV{VFXSDK_ROOT})
+        set(_nvvfx_default "$ENV{VFXSDK_ROOT}")
+    else()
+        set(_nvvfx_default "${CMAKE_SOURCE_DIR}/third_party/nvvfx-sdk")
+    endif()
+    set(NVVFX_SDK_DIR "${_nvvfx_default}" CACHE PATH "Racine du NVIDIA VFX SDK Core installé (non versionné)")
+
+    unset(NVVFX_INCLUDE_DIR CACHE)  # recherché à chaque configuration (NVVFX_SDK_DIR peut changer)
+    find_path(NVVFX_INCLUDE_DIR nvVideoEffects.h
+        HINTS "${NVVFX_SDK_DIR}" PATH_SUFFIXES include nvvfx/include NO_DEFAULT_PATH)
+    if(NOT NVVFX_INCLUDE_DIR)
+        message(FATAL_ERROR
+            "RPENHANCE_NVVFX=ON mais nvVideoEffects.h est introuvable sous NVVFX_SDK_DIR=${NVVFX_SDK_DIR}.\n"
+            "Installe le SDK (scripts/install-nvvfx.ps1, clé NGC dans la variable d'environnement NGC_API_KEY) "
+            "ou passe -DNVVFX_SDK_DIR=<racine du SDK>, ou reconfigure avec -DRPENHANCE_NVVFX=OFF.")
+    endif()
+    set(_nvvfx_includes "${NVVFX_INCLUDE_DIR}")
+    # En-têtes des features (nvVFXVideoFrameGeneration.h, nvVFXVideoSuperRes.h) : à côté de
+    # nvVideoEffects.h ou sous features/<feature>/ selon l'installation.
+    foreach(_hdr nvVFXVideoFrameGeneration.h nvVFXVideoSuperRes.h)
+        file(GLOB_RECURSE _found LIST_DIRECTORIES false "${NVVFX_SDK_DIR}/${_hdr}")
+        if(_found)
+            list(GET _found 0 _first)
+            get_filename_component(_dir "${_first}" DIRECTORY)
+            list(APPEND _nvvfx_includes "${_dir}")
+        else()
+            message(WARNING "${_hdr} introuvable sous ${NVVFX_SDK_DIR} : feature non installée ? "
+                            "(la compilation échouera si les sélecteurs manquent)")
+        endif()
+    endforeach()
+    list(REMOVE_DUPLICATES _nvvfx_includes)
+    message(STATUS "rpenhance : backend NVIDIA VFX activé, en-têtes : ${_nvvfx_includes}")
+
+    set_source_files_properties(src/nvvfx/nvvfx_backend.cpp PROPERTIES
+        INCLUDE_DIRECTORIES "${_nvvfx_includes}")
+    file(TO_CMAKE_PATH "${NVVFX_SDK_DIR}" _nvvfx_dir_def)
+    target_compile_definitions(rpenhance PRIVATE
+        RPENHANCE_HAVE_NVVFX=1
+        RPENHANCE_NVVFX_DEFAULT_DIR="${_nvvfx_dir_def}")
+endif()
+
+# Tests de la logique CPU (sans GPU) : ctest -C Release
+enable_testing()
+add_executable(rpenhance_tests tests/dedupe_test.cpp src/pipeline/dedupe.cpp)
+target_include_directories(rpenhance_tests PRIVATE src)
+add_test(NAME dedupe COMMAND rpenhance_tests)
+add_executable(rpenhance_cut_tests tests/scene_cut_test.cpp src/pipeline/scene_cut.cpp)
+target_include_directories(rpenhance_cut_tests PRIVATE src)
+add_test(NAME scene_cut COMMAND rpenhance_cut_tests)

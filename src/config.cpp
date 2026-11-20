@@ -10,17 +10,39 @@ const wchar_t* usage_text() {
   --list                      liste les fenêtres capturables
   --windowed                  fenêtre classique au lieu de l'overlay plein écran
   --monitor <n>               moniteur de l'overlay (0, 1, ...)
-  --upscale off|bicubic|vsr   méthode d'upscale (défaut : vsr)
+  --capturable                l'overlay reste visible des captures d'écran
+                              (par défaut il en est exclu)
+  --upscale off|bicubic|vsr|nvvfx
+                              méthode d'upscale (défaut : vsr) ; nvvfx = VSR du
+                              NVIDIA Video Effects SDK (build RPENHANCE_NVVFX),
+                              repli sur vsr s'il est indisponible
+  --interp flow|nvvfx         interpolation : flow maison (défaut) ou Video Frame
+                              Generation du SDK NVIDIA (Ada/Blackwell, pilote
+                              >= 570.65), repli sur flow s'il est indisponible
+  --nvvfx-dir <dossier>       racine du NVIDIA VFX SDK Core (défaut : NVVFX_SDK_DIR,
+                              VFXSDK_ROOT, <exe>\nvvfx-sdk, dossier de compilation)
+  --nvvfx-models <dossier>    dossier des modèles du SDK (défaut : celui du SDK)
+  --vfg-mode low|medium|high  modèle VFG (défaut : medium)
+  --nvvfx-vsr-mode <0..4>     mode VSR du SDK : 0 bicubic .. 4 ultra (défaut : 3)
   --sharpness <0..1>          netteté du mode bicubic (défaut : 0.35)
   --no-fg                     désactive la frame generation
-  --dup-threshold <x>         seuil de détection des doublons (défaut : 1.2)
+  --dup-threshold <x>         seuil de base de détection des doublons (défaut : 1.2)
+  --no-adaptive-dedupe        seuil de doublon fixe, sans verrou de rythme
+  --no-hud-protect            pas de masque de bords pour garder le HUD fixe
+  --simple-cuts               coupures détectées sur la seule différence moyenne
+                              (sans corrélation par blocs ni histogramme)
   --delay <x>                 marge du retard d'interpolation (défaut : 1.15)
+  --flow-scale <0.5..1>       résolution d'estimation du flow (défaut : 1.0) ; la
+                              synthèse reste en pleine résolution
   --no-crop                   ne recadre pas la capture en 16:9
   --no-tearing                pas de tearing/VRR sans frame generation
   --no-stats                  démarre avec l'overlay de stats masqué
   --test-pattern              source synthétique (pas besoin de PS5)
   --selftest                  mesure qualité/perf de l'interpolation puis quitte
   --debug                     active la couche de debug D3D11
+  --warp                      rendu logiciel D3D11 WARP au lieu du GPU (CI sans
+                              GPU, très lent ; échoue tout de suite s'il manque
+                              une fonctionnalité D3D11 nécessaire)
 
 Raccourcis globaux : Ctrl+Alt+S stats, U upscale, F frame gen,
                      C comparaison, V flow, Q quitter)";
@@ -60,17 +82,40 @@ Config parse_command_line() {
         else if (s == L"--test-pattern") c.test_pattern = true;
         else if (s == L"--selftest") c.selftest = true;
         else if (s == L"--debug") c.debug_layer = true;
+        else if (s == L"--warp") c.warp = true;
         else if (s == L"--no-fg") c.frame_gen = false;
         else if (s == L"--fg") c.frame_gen = true;
         else if (s == L"--sharpness") c.sharpness = number(i);
         else if (s == L"--dup-threshold") c.dup_threshold = number(i);
+        else if (s == L"--no-adaptive-dedupe") c.adaptive_dedupe = false;
+        else if (s == L"--simple-cuts") c.simple_cuts = true;
+        else if (s == L"--no-hud-protect") c.hud_protect = false;
+        else if (s == L"--capturable") c.capturable = true;
         else if (s == L"--delay") c.delay_scale = number(i);
+        else if (s == L"--flow-scale") c.flow_scale = number(i);
         else if (s == L"--upscale") {
             auto v = to_lower(value(i));
             if (v == L"off") c.upscale = UpscaleMode::Off;
             else if (v == L"bicubic") c.upscale = UpscaleMode::Bicubic;
             else if (v == L"vsr") c.upscale = UpscaleMode::Vsr;
-            else throw std::invalid_argument("--upscale attend off, bicubic ou vsr");
+            else if (v == L"nvvfx") c.upscale = UpscaleMode::Nvvfx;
+            else throw std::invalid_argument("--upscale attend off, bicubic, vsr ou nvvfx");
+        }
+        else if (s == L"--interp") {
+            auto v = to_lower(value(i));
+            if (v == L"flow") c.interp = InterpMode::Flow;
+            else if (v == L"nvvfx") c.interp = InterpMode::Nvvfx;
+            else throw std::invalid_argument("--interp attend flow ou nvvfx");
+        }
+        else if (s == L"--nvvfx-dir") c.nvvfx_dir = value(i);
+        else if (s == L"--nvvfx-models") c.nvvfx_models = value(i);
+        else if (s == L"--nvvfx-vsr-mode") c.nvvfx_vsr_mode = int(number(i));
+        else if (s == L"--vfg-mode") {
+            auto v = to_lower(value(i));
+            if (v == L"low") c.vfg_mode = 0;
+            else if (v == L"medium") c.vfg_mode = 1;
+            else if (v == L"high") c.vfg_mode = 2;
+            else throw std::invalid_argument("--vfg-mode attend low, medium ou high");
         }
         else if (!s.empty() && s[0] == L'-') throw std::invalid_argument("option inconnue : " + narrow(s));
         else c.window = s;
@@ -79,5 +124,7 @@ Config parse_command_line() {
     c.sharpness     = std::clamp(c.sharpness, 0.0f, 1.0f);
     c.dup_threshold = std::clamp(c.dup_threshold, 0.0f, 50.0f);
     c.delay_scale   = std::clamp(c.delay_scale, 1.0f, 3.0f);
+    c.flow_scale    = std::clamp(c.flow_scale, 0.5f, 1.0f);
+    c.nvvfx_vsr_mode = std::clamp(c.nvvfx_vsr_mode, 0, 4);  // modes d'upscale du guide VSR (0..4)
     return c;
 }

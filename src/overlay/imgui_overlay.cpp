@@ -92,6 +92,13 @@ void ImguiOverlay::render(ID3D11RenderTargetView* rtv, const OverlayModel& m, Pi
 
         ImGui::Checkbox("Frame generation", &set.frame_gen);
         ImGui::SliderFloat("Marge du retard", &set.delay_scale, 1.0f, 2.0f, "x%.2f");
+        // Appliquée au relâchement : chaque changement d'échelle vide l'historique des frames.
+        if (!flow_scale_editing_) flow_scale_edit_ = set.flow_scale;
+        ImGui::SliderFloat("Échelle du flow", &flow_scale_edit_, 0.5f, 1.0f, "x%.2f");
+        flow_scale_editing_ = ImGui::IsItemActive();
+        if (ImGui::IsItemDeactivatedAfterEdit()) set.flow_scale = flow_scale_edit_;
+        ImGui::TextDisabled("flow estimé en %ux%u, synthèse en %ux%u", info.flow_res.width, info.flow_res.height,
+                            info.output.width, info.output.height);
         ImGui::Checkbox("Dédoublonnage", &set.dedupe);
         ImGui::Checkbox("Seuil adaptatif + rythme", &set.adaptive_dedupe);
         ImGui::SliderFloat(set.adaptive_dedupe ? "Seuil doublon (base)" : "Seuil doublon", &set.dup_threshold, 0.1f,

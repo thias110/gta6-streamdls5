@@ -62,12 +62,20 @@ bool Pipeline::submit(const SourceFrame& f, double arrival) {
         capture_      = cs;
         info_.capture = cs;
     }
+    // Les pyramides (et donc flows, prédicteurs temporels, mesures) d'échelles différentes ne se
+    // comparent pas : un changement de --flow-scale repart d'un historique vide.
+    const float fscale = std::clamp(settings.flow_scale, 0.5f, 1.0f);
+    if (fscale != pyr_scale_) {
+        reset_history();
+        pyr_scale_ = fscale;
+    }
 
     // 1. Doublon ? (le flux remote play est à 60 fps, le jeu souvent à 30 : une frame sur deux est répétée)
     //    La mesure est lancée ici et lue plus tard (resolve_pending), quand le GPU l'a terminée : plus de
     //    Map bloquant à chaque capture. La capture est copiée car la source la réécrit au prochain poll().
     prof_.begin(ctx, GpuSection::Analyze);
-    motion_.build_pyramid(scratch_, src.srv.Get(), cs);
+    motion_.build_pyramid(scratch_, src.srv.Get(), cs, fscale);
+    info_.flow_res = scratch_.valid() ? scratch_.levels[0].size() : Size2D{};
     UniqueFrame* last = newest();
     if (last && (settings.dedupe || settings.frame_gen)) {
         motion_.begin_measure(scratch_, last->pyr);

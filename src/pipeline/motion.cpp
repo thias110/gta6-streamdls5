@@ -1,6 +1,8 @@
 #include "motion.hpp"
 #include "../gpu/shaders.hpp"
 
+#include <cmath>
+
 namespace {
 // Tampon de mesure : [0] max tuile, [1] somme, [2] nb tuiles (cs_tile_diff) ; à partir de [4] les
 // statistiques de coupure (cs_cut_stats) : n, sa, sb, saa, sbb, sab[9], histogrammes a puis b.
@@ -11,11 +13,16 @@ constexpr UINT kDiffBytes = 512;
 static_assert((kCutHistB + kCutBins) * 4 <= kDiffBytes);
 }  // namespace
 
-void LumaPyramid::ensure(ID3D11Device* dev, Size2D src) {
-    if (src == source && !levels.empty()) return;
+void LumaPyramid::ensure(ID3D11Device* dev, Size2D src, float s) {
+    if (src == source && s == scale && !levels.empty()) return;
     levels.clear();
     source = src;
+    scale  = s;
     uint32_t w = (src.width + 1) / 2, h = (src.height + 1) / 2;
+    if (s < 1.0f) {
+        w = std::max(1u, uint32_t(std::lround(double(src.width) * 0.5 * s)));
+        h = std::max(1u, uint32_t(std::lround(double(src.height) * 0.5 * s)));
+    }
     for (int i = 0; i < kMaxLevels; ++i) {
         GpuTexture t;
         t.ensure(dev, w, h, DXGI_FORMAT_R16_FLOAT, D3D11_BIND_SHADER_RESOURCE | D3D11_BIND_UNORDERED_ACCESS, "luma");
@@ -29,6 +36,7 @@ void LumaPyramid::ensure(ID3D11Device* dev, Size2D src) {
 void MotionEngine::init(D3DContext& d3d) {
     d3d_          = &d3d;
     cs_luma_rgb_  = d3d.make_cs(shaders::kLuma, "cs_luma_from_rgb");
+    cs_luma_rgb_scaled_ = d3d.make_cs(shaders::kLuma, "cs_luma_from_rgb_scaled");
     cs_luma_down_ = d3d.make_cs(shaders::kLuma, "cs_luma_down");
     cs_diff_      = d3d.make_cs(shaders::kTileDiff, "cs_tile_diff");
     cs_cut_       = d3d.make_cs(shaders::kCutStats, "cs_cut_stats");
@@ -61,9 +69,11 @@ void MotionEngine::init(D3DContext& d3d) {
     }
 }
 
-void MotionEngine::build_pyramid(LumaPyramid& pyr, ID3D11ShaderResourceView* rgb, Size2D src) {
+void MotionEngine::build_pyramid(LumaPyramid& pyr, ID3D11ShaderResourceView* rgb, Size2D src, float scale) {
     auto* ctx = d3d_->ctx();
-    pyr.ensure(d3d_->device(), src);
+    scale = std::clamp(scale, 0.5f, 1.0f);
+    pyr.ensure(d3d_->device(), src, scale);
+    if (scale < 1.0f) d3d_->bind_samplers_cs();
     struct {
         uint32_t dw, dh, sw, sh;
     } cb{};
@@ -74,7 +84,7 @@ void MotionEngine::build_pyramid(LumaPyramid& pyr, ID3D11ShaderResourceView* rgb
         if (i == 0) {
             cb      = {dst.width, dst.height, src.width, src.height};
             srvs[0] = rgb;
-            ctx->CSSetShader(cs_luma_rgb_.Get(), nullptr, 0);
+            ctx->CSSetShader(scale < 1.0f ? cs_luma_rgb_scaled_.Get() : cs_luma_rgb_.Get(), nullptr, 0);
         } else {
             const GpuTexture& s = pyr.levels[i - 1];
             cb      = {dst.width, dst.height, s.width, s.height};
@@ -121,7 +131,7 @@ void MotionEngine::build_edges(const LumaPyramid& pyr, GpuTexture& out) {
 }
 
 void MotionEngine::begin_measure(const LumaPyramid& a, const LumaPyramid& b) {
-    if (!a.valid() || !b.valid() || !(a.source == b.source)) {
+    if (!a.compatible(b)) {
         pending_           = -1;
         pending_immediate_ = true;
         immediate_         = {255.0f, 255.0f, {}};
@@ -132,7 +142,8 @@ void MotionEngine::begin_measure(const LumaPyramid& a, const LumaPyramid& b) {
     write_ ^= 1;
 
     auto* ctx = d3d_->ctx();
-    const size_t lvl = std::min<size_t>(1, a.levels.size() - 1);  // quart de résolution
+    // ~quart de résolution de la capture : niveau 1, ou niveau 0 si la pyramide est déjà réduite.
+    const size_t lvl = std::min<size_t>(a.scale < 0.75f ? 0 : 1, a.levels.size() - 1);
     const GpuTexture& la = a.levels[lvl];
     const GpuTexture& lb = b.levels[lvl];
 

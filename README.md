@@ -114,6 +114,7 @@ Options : `rpenhance.exe --help`. Les plus utiles :
 | `--simple-cuts` | coupures détectées sur la seule différence moyenne |
 | `--no-hud-protect` | pas de masque de bords pour garder le HUD fixe |
 | `--delay 1.15` | marge du retard ; à monter si l'image saccade quand le réseau varie |
+| `--flow-scale 0.75` | flow estimé à résolution réduite (0.5 à 1.0, défaut 1.0) : moins de GPU, vecteurs plus grossiers ; synthèse toujours en pleine résolution |
 | `--windowed` | fenêtre classique au lieu de l'overlay |
 | `--monitor 1` | overlay sur un autre écran |
 | `--capturable` | l'overlay reste visible des captures d'écran (OBS, partage) |
@@ -142,7 +143,9 @@ Compare l'image interpolée à la vraie image intermédiaire de la mire et écri
 | rapide (×2,5) | 12,9 dB | 15,5 dB | **19,7 dB** |
 
 Coût GPU : ~2,6 ms par frame unique (flow aller + retour depuis une source 1080p), 0,1 ms par image
-affichée.
+affichée. Ces chiffres datent d'avant la branche `feat/robustesse-qualite` (mesures de coupure,
+masque de bords, `--flow-scale`) : à remesurer. Le selftest journalise aussi la qualité avec et sans
+protection du HUD et avec `--flow-scale 0.5`.
 
 ## Limites connues
 
@@ -152,6 +155,10 @@ affichée.
   (`tests/dedupe_test.cpp`) ont été vérifiées. À compiler et valider sur Windows (`--selftest`,
   `--test-pattern`) avant usage.
 
+- `--flow-scale` < 1 : moins de travail pour le flow (environ proportionnel au carré de l'échelle),
+  mais blocs de mouvement plus gros en pixels réels, donc contours d'objets plus baveux ; la mesure
+  de doublon et le masque de bords passent aussi à la résolution réduite (le seuil adaptatif suit).
+  Changer l'échelle dans l'overlay vide l'historique (une courte saccade).
 - Protection du HUD : un HUD semi-transparent sur un décor qui bouge n'est pas « fixe » (A et B
   diffèrent) et reste interpolé ; un bord d'objet qui bouge de moins d'un demi-pixel peut être tenu en
   fondu au lieu d'être déplacé (invisible en pratique, mais non mesuré sur du vrai contenu).

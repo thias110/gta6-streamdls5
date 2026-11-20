@@ -175,6 +175,23 @@ int run_selftest(const Config& cfg) {
         log_msg("[vitesse x%.1f] PSNR frame du milieu : répétition %.2f dB, fondu %.2f dB, interpolation %.2f dB -> %s",
                 speed, p_near, p_blend, p_synth, interp_ok ? "OK" : "ÉCHEC");
         log_msg("[vitesse x%.1f] protection du HUD : %.2f dB sans, %.2f dB avec", speed, psnr(iGT, iS0), p_synth);
+
+        {  // --flow-scale 0.5 (indicatif) : flow à résolution réduite, synthèse en pleine résolution.
+            LumaPyramid ha, hb;
+            GpuTexture  hfab, hfba, hea, heb;
+            me.build_pyramid(ha, A.srv.Get(), cap, 0.5f);
+            me.build_pyramid(hb, B.srv.Get(), cap, 0.5f);
+            me.estimate_flow(ha, hb, nullptr, 1.0f, hfab);
+            me.estimate_flow(hb, ha, nullptr, 1.0f, hfba);
+            me.build_edges(ha, hea);
+            me.build_edges(hb, heb);
+            comp.begin(Syn.rtv.Get(), vp);
+            comp.synth(Aup.srv.Get(), Bup.srv.Get(), hfab.srv.Get(), hfba.srv.Get(), 0.5f, SynthParams{},
+                       ha.flow_scale(), hea.srv.Get(), heb.srv.Get());
+            comp.end();
+            log_msg("[vitesse x%.1f] flow-scale 0.5 : interpolation %.2f dB (1.0 : %.2f dB)", speed,
+                    psnr(iGT, readback(d3d, Syn)), p_synth);
+        }
         ok = ok && dedupe_ok && interp_ok && cut_ok;
 
         if (speed == 1.0f) {

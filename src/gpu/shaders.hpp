@@ -110,6 +110,21 @@ void cs_luma_from_rgb(uint3 id : SV_DispatchThreadID) {
     g_ldst[id.xy] = l * 0.25;
 }
 
+// Niveau 0 à échelle réduite (--flow-scale < 1) : facteur de réduction entre 2 et 4, donc 4 lectures
+// bilinéaires aux quarts de l'empreinte du texel de destination (moyenne d'environ 4x4 texels source).
+[numthreads(8, 8, 1)]
+void cs_luma_from_rgb_scaled(uint3 id : SV_DispatchThreadID) {
+    if (id.x >= g_dst_size.x || id.y >= g_dst_size.y) return;
+    float2 inv = 1.0 / float2(g_dst_size);
+    float2 uv  = (float2(id.xy) + 0.5) * inv;
+    float2 o   = 0.25 * inv;
+    float l = luma(g_rgb.SampleLevel(g_linear, uv + float2(-o.x, -o.y), 0).rgb)
+            + luma(g_rgb.SampleLevel(g_linear, uv + float2( o.x, -o.y), 0).rgb)
+            + luma(g_rgb.SampleLevel(g_linear, uv + float2(-o.x,  o.y), 0).rgb)
+            + luma(g_rgb.SampleLevel(g_linear, uv + float2( o.x,  o.y), 0).rgb);
+    g_ldst[id.xy] = l * 0.25;
+}
+
 [numthreads(8, 8, 1)]
 void cs_luma_down(uint3 id : SV_DispatchThreadID) {
     if (id.x >= g_dst_size.x || id.y >= g_dst_size.y) return;

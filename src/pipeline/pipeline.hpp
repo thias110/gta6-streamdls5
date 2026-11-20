@@ -15,6 +15,7 @@ struct PipelineSettings {
     float       dup_threshold = 1.2f;   // seuil de base (fixe si adaptive_dedupe est faux)
     bool        adaptive_dedupe = true; // seuil qui suit le bruit de fond + verrou de rythme 2/3
     float       delay_scale   = 1.15f;
+    float       flow_scale    = 1.0f;   // 0.5..1 : résolution d'estimation du flow (synthèse toujours pleine)
     // Changement de plan (différence moyenne > cut.mean_max, ou corrélation des blocs / histogrammes) :
     // pas de flow, et HOLD : la frame précédente reste affichée jusqu'à l'instant de la nouvelle.
     CutParams   cut;
@@ -40,7 +41,8 @@ struct PipelineInfo {
     float          last_alpha    = 0.0f;
     bool           interpolating = false;
     uint64_t       unique_frames = 0;
-    uint64_t       blocking_reads = 0;  // lectures de mesure qui ont dû attendre le GPU
+    uint64_t       blocking_reads = 0;
+    Size2D         flow_res{};          // résolution du niveau 0 de la pyramide (estimation du flow)  // lectures de mesure qui ont dû attendre le GPU
 };
 
 // capture -> dédoublonnage -> upscale -> flow (paire précédente) ; puis à chaque rafraîchissement
@@ -110,6 +112,7 @@ private:
     GpuTexture                 pending_src_;  // copie de la capture en attente de sa mesure
     Pending                    pending_;
     Size2D                     capture_{}, output_{};
+    float                      pyr_scale_ = 1.0f;  // échelle des pyramides de l'historique
     uint64_t                   next_id_ = 1;
     double                     interval_ = 0.0, jitter_ = 0.0;
     double                     lag_ = 0.0, lag_jitter_ = 0.0;  // retard d'arrivée des captures

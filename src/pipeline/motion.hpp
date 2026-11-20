@@ -12,13 +12,18 @@ inline FlowScale flow_grid_scale(uint32_t w, uint32_t h) {
     return {float(w) / float(gw * kFlowBlock), float(h) / float(gh * kFlowBlock)};
 }
 
-// Pyramide de luminance R16F ; niveau 0 = demi-résolution de la capture.
+// Pyramide de luminance R16F ; niveau 0 = demi-résolution de la capture x scale (--flow-scale).
 struct LumaPyramid {
     static constexpr int kMaxLevels = 5;
     std::vector<GpuTexture> levels;
     Size2D                  source{};
+    float                   scale = 1.0f;
 
-    void ensure(ID3D11Device* dev, Size2D src);
+    void ensure(ID3D11Device* dev, Size2D src, float scale);
+    // Même source, même échelle : mesures et flow comparables.
+    bool compatible(const LumaPyramid& o) const {
+        return valid() && o.valid() && source == o.source && scale == o.scale && levels.size() == o.levels.size();
+    }
     bool valid() const { return !levels.empty(); }
     // Facteur à appliquer aux UV image pour lire le flow de niveau 0 (sortie de estimate_flow).
     FlowScale flow_scale() const { return valid() ? flow_grid_scale(levels[0].width, levels[0].height) : FlowScale{}; }
@@ -34,7 +39,9 @@ struct DiffResult {
 class MotionEngine {
 public:
     void init(D3DContext& d3d);
-    void build_pyramid(LumaPyramid& pyr, ID3D11ShaderResourceView* rgb, Size2D src);
+    // scale (0.5..1) : réduit la résolution de la pyramide, donc du flow, des mesures et du masque de
+    // bords ; la synthèse reste en pleine résolution (le flow est en UV normalisés).
+    void build_pyramid(LumaPyramid& pyr, ID3D11ShaderResourceView* rgb, Size2D src, float scale = 1.0f);
     // Masque de bords dilaté (Sobel + max 3x3) du niveau 0, pour la protection du HUD dans ps_synth.
     void build_edges(const LumaPyramid& pyr, GpuTexture& out);
     // Mesure asynchrone en double tampon : begin_measure() lance les noyaux et la copie vers l'un des
@@ -59,7 +66,7 @@ public:
 
 private:
     D3DContext*                         d3d_ = nullptr;
-    ComPtr<ID3D11ComputeShader>         cs_luma_rgb_, cs_luma_down_, cs_diff_, cs_cut_, cs_motion_, cs_propagate_,
+    ComPtr<ID3D11ComputeShader>         cs_luma_rgb_, cs_luma_rgb_scaled_, cs_luma_down_, cs_diff_, cs_cut_, cs_motion_, cs_propagate_,
                                         cs_median_, cs_sobel_, cs_dilate_;
     GpuTexture                          edge_tmp_;
     ComPtr<ID3D11Buffer>                diff_buf_[2], diff_staging_[2];

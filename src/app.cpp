@@ -206,6 +206,7 @@ int App::run() {
     s.cut.enabled     = !cfg_.simple_cuts;
     s.synth.hud_protect = cfg_.hud_protect;
     s.delay_scale   = cfg_.delay_scale;
+    s.flow_scale    = cfg_.flow_scale;
 
     if (!open_source()) return 1;
     create_window();

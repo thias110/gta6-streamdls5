@@ -21,6 +21,8 @@ const wchar_t* usage_text() {
   --simple-cuts               coupures détectées sur la seule différence moyenne
                               (sans corrélation par blocs ni histogramme)
   --delay <x>                 marge du retard d'interpolation (défaut : 1.15)
+  --flow-scale <0.5..1>       résolution d'estimation du flow (défaut : 1.0) ; la
+                              synthèse reste en pleine résolution
   --no-crop                   ne recadre pas la capture en 16:9
   --no-tearing                pas de tearing/VRR sans frame generation
   --no-stats                  démarre avec l'overlay de stats masqué
@@ -75,6 +77,7 @@ Config parse_command_line() {
         else if (s == L"--no-hud-protect") c.hud_protect = false;
         else if (s == L"--capturable") c.capturable = true;
         else if (s == L"--delay") c.delay_scale = number(i);
+        else if (s == L"--flow-scale") c.flow_scale = number(i);
         else if (s == L"--upscale") {
             auto v = to_lower(value(i));
             if (v == L"off") c.upscale = UpscaleMode::Off;
@@ -89,5 +92,6 @@ Config parse_command_line() {
     c.sharpness     = std::clamp(c.sharpness, 0.0f, 1.0f);
     c.dup_threshold = std::clamp(c.dup_threshold, 0.0f, 50.0f);
     c.delay_scale   = std::clamp(c.delay_scale, 1.0f, 3.0f);
+    c.flow_scale    = std::clamp(c.flow_scale, 0.5f, 1.0f);
     return c;
 }

@@ -8,7 +8,8 @@
 //  - corrélation de la luminance par blocs (~32x32 px), meilleure de 9 décalages d'un bloc pour
 //    qu'un mouvement de caméra ordinaire ne passe pas pour une coupure ;
 //  - distance entre histogrammes de luminance (variation totale, 0..1).
-// Idées inspirées de SmoovPlay (MIT, framegen/cadence.py) ; implémentation propre à rpenhance.
+// La différence moyenne seule ne suffit plus quand la corrélation montre un simple déplacement
+// (voir CutParams::corr_same). Idées inspirées de SmoovPlay (MIT, framegen/cadence.py) ; implémentation propre à rpenhance.
 
 #include <cstdint>
 
@@ -33,6 +34,14 @@ struct CutParams {
     float corr_max    = 0.35f;  // coupure si corrélation < corr_max ET histogrammes éloignés...
     float hist_min    = 0.15f;
     float corr_strong = 0.10f;  // ...ou si corrélation < corr_strong quelle que soit la luminosité
+    // Garde-fou du critère de différence moyenne : un panoramique rapide sur un décor très contrasté
+    // dépasse mean_max (CI, selftest WARP, mire x2.5 : corr 0.94, histo 0.24 -> faux « coupure »).
+    // Si la corrélation reste >= corr_same ET les histogrammes proches (<= hist_same), le contenu est
+    // celui de l'image précédente déplacé d'au plus un bloc : même plan, la différence moyenne est ignorée.
+    // La distance d'histogrammes garde les coupures entre plans de disposition proche mais de tonalité
+    // différente (corrélation haute, histogrammes éloignés).
+    float corr_same   = 0.85f;
+    float hist_same   = 0.35f;
 };
 
 CutFeatures cut_features(const CutStatsRaw& r);

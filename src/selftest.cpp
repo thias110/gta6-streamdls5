@@ -149,10 +149,10 @@ int run_selftest(const Config& cfg) {
         const CutFeatures far_f  = cut_features(far_d.cut);
         const bool same_cut = is_scene_cut(uni.mean, same_f, cutp), far_cut = is_scene_cut(far_d.mean, far_f, cutp);
         const bool cut_ok   = !same_cut;
-        log_msg("[vitesse x%.1f] coupure : frame suivante corr %.2f histo %.2f -> %s (%s) ; image 7 s plus loin "
-                "corr %.2f histo %.2f -> %s (indicatif)",
-                speed, same_f.corr, same_f.hist, same_cut ? "coupure" : "même plan", cut_ok ? "OK" : "ÉCHEC",
-                far_f.corr, far_f.hist, far_cut ? "coupure" : "même plan");
+        log_msg("[vitesse x%.1f] coupure : frame suivante diff. moy. %.1f corr %.2f histo %.2f -> %s (%s) ; image 7 s "
+                "plus loin diff. moy. %.1f corr %.2f histo %.2f -> %s (indicatif)",
+                speed, uni.mean, same_f.corr, same_f.hist, same_cut ? "coupure" : "même plan", cut_ok ? "OK" : "ÉCHEC",
+                far_d.mean, far_f.corr, far_f.hist, far_cut ? "coupure" : "même plan");
 
         me.estimate_flow_pair(pa, pb, nullptr, 1.0f, fab, nullptr, 1.0f, fba);
         me.build_edges(pa, ea);

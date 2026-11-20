@@ -59,7 +59,9 @@ fenêtre Remote Play ──WGC──► recadrage zone client 16:9
   caméra) et distance d'histogrammes, calculées sur le niveau le plus grossier de la pyramide. La
   corrélation ne dépend pas de la luminosité : elle repère les coupures entre deux plans sombres.
   Sur une coupure, pas d'interpolation : l'image précédente est tenue (**HOLD**) jusqu'à l'instant
-  de la nouvelle. `--simple-cuts` revient au seul critère d'origine.
+  de la nouvelle. Un panoramique rapide sur un décor contrasté dépasse la différence moyenne sans
+  changer de plan : si la corrélation reste haute (≥ 0,85) et les histogrammes proches (≤ 0,35), la
+  différence moyenne est ignorée. `--simple-cuts` revient au seul critère d'origine.
 - **Overlay** : fenêtre plein écran au-dessus de la remote play, qui ne prend **jamais le focus**.
   La manette reste donc branchée sur la remote play. Il est exclu des captures d'écran
   (`SetWindowDisplayAffinity(WDA_EXCLUDEFROMCAPTURE)`, Windows 10 2004+) : un enregistreur ou un

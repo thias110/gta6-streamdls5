@@ -43,8 +43,11 @@ CutFeatures cut_features(const CutStatsRaw& r) {
 }
 
 bool is_scene_cut(float mean_diff, const CutFeatures& f, const CutParams& p) {
-    if (mean_diff > p.mean_max) return true;
-    if (!p.enabled || !f.valid) return false;
+    const bool indices = p.enabled && f.valid;
+    // Même contenu à un bloc près et même répartition des luminances : mouvement, pas coupure.
+    const bool moved_same_shot = indices && f.corr >= p.corr_same && f.hist <= p.hist_same;
+    if (mean_diff > p.mean_max && !moved_same_shot) return true;
+    if (!indices) return false;
     if (f.corr < p.corr_strong) return true;
     return f.corr < p.corr_max && f.hist > p.hist_min;
 }

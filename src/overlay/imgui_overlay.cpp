@@ -135,6 +135,8 @@ void ImguiOverlay::render(ID3D11RenderTargetView* rtv, const OverlayModel& m, Pi
             ImGui::SliderFloat("corrélation max", &set.cut.corr_max, -0.5f, 0.9f, "%.2f");
             ImGui::SliderFloat("distance histo min", &set.cut.hist_min, 0.0f, 1.0f, "%.2f");
             ImGui::SliderFloat("corrélation seule max", &set.cut.corr_strong, -0.5f, 0.5f, "%.2f");
+            ImGui::SliderFloat("même plan : corrélation min", &set.cut.corr_same, 0.5f, 1.0f, "%.2f");
+            ImGui::SliderFloat("même plan : distance histo max", &set.cut.hist_same, 0.0f, 1.0f, "%.2f");
         }
 
         ImGui::Separator();

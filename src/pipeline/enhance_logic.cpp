@@ -149,6 +149,119 @@ Image8 finish_ref(const Image8& src, const Params& p) {
     return out;
 }
 
+namespace {
+// xorshift64* : suite identique sur toutes les plateformes (std::normal_distribution ne l'est pas).
+struct Rng {
+    uint64_t s;
+    explicit Rng(uint32_t seed) : s(0x9E3779B97F4A7C15ull ^ (uint64_t(seed) * 0xD1B54A32D192ED03ull)) {
+        if (!s) s = 1;
+    }
+    double uniform() {  // ]0, 1[
+        s ^= s >> 12;
+        s ^= s << 25;
+        s ^= s >> 27;
+        return (double((s * 0x2545F4914F6CDD1Dull) >> 11) + 0.5) * (1.0 / 9007199254740992.0);
+    }
+    double gauss() {
+        const double u = uniform(), v = uniform();
+        return std::sqrt(-2.0 * std::log(u)) * std::cos(6.283185307179586 * v);
+    }
+};
+
+double luma8(const uint8_t* p) { return 0.2126 * p[2] + 0.7152 * p[1] + 0.0722 * p[0]; }
+}  // namespace
+
+Image8 degrade_blocks(const Image8& src, float q, float noise, uint32_t seed) {
+    Image8 out = src;
+    double basis[8][8];  // basis[k][x] = c(k) cos((2x + 1) k pi / 16) / 2 (DCT-II orthonormale)
+    for (int k = 0; k < 8; ++k)
+        for (int x = 0; x < 8; ++x)
+            basis[k][x] = (k ? 0.5 : std::sqrt(0.125)) * std::cos((2 * x + 1) * k * 3.141592653589793 / 16.0);
+    for (int by = 0; by + 8 <= src.h; by += 8) {
+        for (int bx = 0; bx + 8 <= src.w; bx += 8) {
+            for (int ch = 0; ch < 3; ++ch) {
+                double b[8][8], t[8][8], c[8][8];
+                for (int y = 0; y < 8; ++y)
+                    for (int x = 0; x < 8; ++x) b[y][x] = double(src.at(bx + x, by + y)[ch]) - 128.0;
+                for (int y = 0; y < 8; ++y)  // lignes
+                    for (int u = 0; u < 8; ++u) {
+                        double a = 0.0;
+                        for (int x = 0; x < 8; ++x) a += basis[u][x] * b[y][x];
+                        t[y][u] = a;
+                    }
+                for (int v = 0; v < 8; ++v)  // colonnes + quantification
+                    for (int u = 0; u < 8; ++u) {
+                        double a = 0.0;
+                        for (int y = 0; y < 8; ++y) a += basis[v][y] * t[y][u];
+                        const double st = (u + v == 0) ? 8.0 : double(q) * (1.0 + 0.5 * (u + v));
+                        c[v][u] = q > 0.0f ? std::round(a / st) * st : a;  // q <= 0 : pas de quantification
+                    }
+                for (int y = 0; y < 8; ++y)  // inverse : colonnes
+                    for (int u = 0; u < 8; ++u) {
+                        double a = 0.0;
+                        for (int v = 0; v < 8; ++v) a += basis[v][y] * c[v][u];
+                        t[y][u] = a;
+                    }
+                for (int y = 0; y < 8; ++y)  // inverse : lignes
+                    for (int x = 0; x < 8; ++x) {
+                        double a = 0.0;
+                        for (int u = 0; u < 8; ++u) a += basis[u][x] * t[y][u];
+                        out.at(bx + x, by + y)[ch] = uint8_t(std::clamp(std::lround(a + 128.0), 0L, 255L));
+                    }
+            }
+        }
+    }
+    if (noise > 0.0f) {
+        Rng rng(seed);
+        for (size_t i = 0; i < out.px.size(); i += 4)
+            for (int ch = 0; ch < 3; ++ch)
+                out.px[i + size_t(ch)] =
+                    uint8_t(std::clamp(std::lround(double(out.px[i + size_t(ch)]) + rng.gauss() * noise), 0L, 255L));
+    }
+    return out;
+}
+
+double psnr(const Image8& ref, const Image8& test) {
+    double se = 0.0;
+    size_t n  = 0;
+    const size_t sz = std::min(ref.px.size(), test.px.size());
+    for (size_t i = 0; i + 3 < sz; i += 4)
+        for (size_t c = 0; c < 3; ++c) {
+            const double d = double(ref.px[i + c]) - double(test.px[i + c]);
+            se += d * d;
+            ++n;
+        }
+    if (!n) return 0.0;
+    const double mse = se / double(n);
+    return mse <= 1e-12 ? 99.0 : 10.0 * std::log10(255.0 * 255.0 / mse);
+}
+
+double ssim(const Image8& ref, const Image8& test) {
+    const double c1 = (0.01 * 255.0) * (0.01 * 255.0), c2 = (0.03 * 255.0) * (0.03 * 255.0);
+    const int    w = std::min(ref.w, test.w), h = std::min(ref.h, test.h);
+    double total = 0.0;
+    int    n     = 0;
+    for (int by = 0; by + 8 <= h; by += 8) {
+        for (int bx = 0; bx + 8 <= w; bx += 8) {
+            double sa = 0.0, sb = 0.0, saa = 0.0, sbb = 0.0, sab = 0.0;
+            for (int y = 0; y < 8; ++y)
+                for (int x = 0; x < 8; ++x) {
+                    const double a = luma8(ref.at(bx + x, by + y)), b = luma8(test.at(bx + x, by + y));
+                    sa += a;
+                    sb += b;
+                    saa += a * a;
+                    sbb += b * b;
+                    sab += a * b;
+                }
+            const double ma = sa / 64.0, mb = sb / 64.0;
+            const double va = saa / 64.0 - ma * ma, vb = sbb / 64.0 - mb * mb, cov = sab / 64.0 - ma * mb;
+            total += ((2.0 * ma * mb + c1) * (2.0 * cov + c2)) / ((ma * ma + mb * mb + c1) * (va + vb + c2));
+            ++n;
+        }
+    }
+    return n ? total / n : 0.0;
+}
+
 Params Smoother::update(const Params& target_in, double now, float tau) {
     const Params target = clamp_params(target_in);
     const double dt     = now - last_;

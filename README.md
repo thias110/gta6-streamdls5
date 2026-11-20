@@ -458,6 +458,15 @@ affichée. Ces chiffres datent d'avant la branche `feat/robustesse-qualite` (mes
 masque de bords, `--flow-scale`) : à remesurer. Le selftest journalise aussi la qualité avec et sans
 protection du HUD et avec `--flow-scale 0.5`.
 
+Amélioration d'image (`--enhance`) : le selftest dégrade la mire propre façon compression (blocs 8×8
+quantifiés + bruit gaussien, sur CPU) et journalise le PSNR et le SSIM vers la mire propre sans puis
+avec l'étage A (à la résolution de capture, puis après un upscale bicubique), l'écart entre le shader
+et sa référence CPU, le plus grand dépassement (halo) de l'étage B sur un bord net 51 → 204 (netteté
+seule : doit rester nul ; clarté et réglages complets : indicatif) et le coût GPU des deux étages.
+Verdict : le débruitage doit améliorer PSNR et SSIM, la netteté ne doit pas dépasser. Images :
+`amelioration_degradee.bmp`, `amelioration_debruitee.bmp`, `amelioration_finie.bmp`. Aucun chiffre
+mesuré sur GPU réel à ce jour ; la logique et les références CPU sont testées par `ctest` (`enhance`).
+
 Frame tap sans PS5 : `tap_writer` (émetteur de test, copie adaptée de l'émetteur MIT de SmoovPlay)
 envoie deux sessions de frames NV12 ou BGRA, avec arrêt puis redémarrage ; `--selftest-tap` les lit,
 relit chaque image convertie et vérifie numéro de frame, couleurs, drapeaux et sessions (code 0/1).

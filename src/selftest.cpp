@@ -3,6 +3,7 @@
 #include "capture/test_source.hpp"
 #include "gpu/profiler.hpp"
 #include "pipeline/compositor.hpp"
+#include "pipeline/enhancer.hpp"
 #include "pipeline/motion.hpp"
 #include "pipeline/upscaler.hpp"
 
@@ -74,6 +75,162 @@ void write_bmp(const std::wstring& path, const Image& img) {
     std::fwrite(&ih, sizeof(ih), 1, f);
     std::fwrite(img.px.data(), 1, img.px.size(), f);
     std::fclose(f);
+}
+
+enhance::Image8 to8(const Image& i) {
+    enhance::Image8 o;
+    o.w  = int(i.w);
+    o.h  = int(i.h);
+    o.px = i.px;
+    return o;
+}
+Image from8(const enhance::Image8& i) {
+    Image o;
+    o.w  = uint32_t(i.w);
+    o.h  = uint32_t(i.h);
+    o.px = i.px;
+    return o;
+}
+
+// Texture BGRA8 (SRV + RTV) remplie depuis le CPU.
+void upload(D3DContext& d3d, GpuTexture& t, const enhance::Image8& img) {
+    t.ensure(d3d.device(), uint32_t(img.w), uint32_t(img.h), DXGI_FORMAT_B8G8R8A8_UNORM,
+             D3D11_BIND_SHADER_RESOURCE | D3D11_BIND_RENDER_TARGET, "selftest upload");
+    d3d.ctx()->UpdateSubresource(t.tex.Get(), 0, nullptr, img.px.data(), UINT(img.w) * 4, 0);
+}
+
+// Plus grand dépassement (niveaux) de la composante verte hors de [lo, hi], sur toute l'image.
+int overshoot(const Image& img, int lo, int hi) {
+    int o = 0;
+    for (size_t i = 0; i < img.px.size(); i += 4) o = std::max({o, int(img.px[i + 1]) - hi, lo - int(img.px[i + 1])});
+    return o;
+}
+
+// --enhance : étage A (débruitage) sur la mire dégradée façon compression, étage B (netteté) sur un bord net.
+// Résultats au journal (préfixe « Amélioration ») ; renvoie le verdict (gain du débruitage, absence de halo).
+bool selftest_enhance(D3DContext& d3d, Compositor& comp, MotionEngine& me, Upscaler& up, TestPattern& tp,
+                      GpuProfiler& prof, Size2D cap, Size2D out, const std::wstring& dir) {
+    auto*    ctx = d3d.ctx();
+    Enhancer enh;
+    enh.init(d3d, comp);
+    const UINT rt = D3D11_BIND_SHADER_RESOURCE | D3D11_BIND_RENDER_TARGET;
+
+    // 1. Étage A : mire propre (sans bruit), dégradée sur CPU (blocs 8x8 quantifiés + bruit gaussien).
+    GpuTexture clean, deg;
+    clean.ensure(d3d.device(), cap.width, cap.height, DXGI_FORMAT_B8G8R8A8_UNORM, rt, "enh clean");
+    tp.render(clean, 2.0, 0.0f, 0.0f, 1.0f);
+    const Image           iclean = readback(d3d, clean);
+    const enhance::Image8 c8     = to8(iclean);
+    const enhance::Image8 d8     = enhance::degrade_blocks(c8, 12.0f, 2.0f, 7);
+    upload(d3d, deg, d8);
+    const enhance::Params defaults;
+    const Image ideno = readback(d3d, enh.denoise(deg, defaults.denoise));
+    const enhance::Image8 n8 = to8(ideno);
+    const double p_deg = enhance::psnr(c8, d8), s_deg = enhance::ssim(c8, d8);
+    const double p_den = enhance::psnr(c8, n8), s_den = enhance::ssim(c8, n8);
+    const bool   den_ok = p_den > p_deg && s_den > s_deg;
+    log_msg("Amélioration étage A (débruitage %.2f) : mire dégradée PSNR %.2f dB SSIM %.4f -> débruitée PSNR %.2f dB "
+            "SSIM %.4f -> %s",
+            defaults.denoise, p_deg, s_deg, p_den, s_den, den_ok ? "OK" : "ÉCHEC");
+    {  // Écart GPU / référence CPU (indicatif : exp() et arrondis peuvent différer d'un niveau).
+        const enhance::Image8 ref = enhance::denoise_ref(d8, defaults.denoise);
+        int    worst = 0;
+        size_t over1 = 0;
+        for (size_t i = 0; i < ref.px.size(); i += 4)
+            for (size_t c = 0; c < 3; ++c) {
+                const int d = std::abs(int(ref.px[i + c]) - int(n8.px[i + c]));
+                worst       = std::max(worst, d);
+                over1 += d > 1;
+            }
+        log_msg("Amélioration étage A : écart GPU / référence CPU max %d niveau(x), %zu composante(s) > 1 (indicatif)",
+                worst, over1);
+    }
+    {  // Après l'upscale (bicubique) : la dégradation est-elle moins amplifiée ?
+        GpuTexture uc, ud, un;
+        for (GpuTexture* t : {&uc, &ud, &un}) t->ensure(d3d.device(), out.width, out.height, DXGI_FORMAT_B8G8R8A8_UNORM, rt, "enh up");
+        ctx->CopyResource(uc.tex.Get(), up.run(clean, out, UpscaleMode::Bicubic, 0.35f).tex.Get());
+        ctx->CopyResource(ud.tex.Get(), up.run(deg, out, UpscaleMode::Bicubic, 0.35f).tex.Get());
+        ctx->CopyResource(un.tex.Get(), up.run(enh.denoise(deg, defaults.denoise), out, UpscaleMode::Bicubic, 0.35f).tex.Get());
+        const enhance::Image8 a = to8(readback(d3d, uc)), b = to8(readback(d3d, ud)), n = to8(readback(d3d, un));
+        log_msg("Amélioration étage A après upscale bicubique : sans PSNR %.2f dB SSIM %.4f, avec PSNR %.2f dB SSIM %.4f "
+                "(indicatif)",
+                enhance::psnr(a, b), enhance::ssim(a, b), enhance::psnr(a, n), enhance::ssim(a, n));
+    }
+    write_bmp(dir + L"amelioration_degradee.bmp", from8(d8));
+    write_bmp(dir + L"amelioration_debruitee.bmp", ideno);
+
+    // 2. Étage B : bord net vertical + horizontal (51 -> 204), upscalé en bicubique sans netteté, puis finition.
+    enhance::Image8 st;
+    st.w = int(cap.width);
+    st.h = int(cap.height);
+    st.px.resize(size_t(st.w) * size_t(st.h) * 4);
+    for (int y = 0; y < st.h; ++y)
+        for (int x = 0; x < st.w; ++x) {
+            uint8_t* q = st.at(x, y);
+            const uint8_t v = (x >= st.w / 2) != (y >= st.h / 2) ? 204 : 51;
+            q[0] = q[1] = q[2] = v;
+            q[3] = 255;
+        }
+    GpuTexture step, stepup;
+    upload(d3d, step, st);
+    stepup.ensure(d3d.device(), out.width, out.height, DXGI_FORMAT_B8G8R8A8_UNORM, rt, "enh step up");
+    ctx->CopyResource(stepup.tex.Get(), up.run(step, out, UpscaleMode::Bicubic, 0.0f).tex.Get());
+    LumaPyramid sp;
+    me.build_pyramid(sp, step.srv.Get(), cap);
+    Enhancer::FinishInputs fi;
+    fi.cur = &sp;
+    auto finish_overshoot = [&](const enhance::Params& p) {
+        return overshoot(readback(d3d, enh.finish(stepup, p, fi)), 51, 204);
+    };
+    enhance::Params only_sharp;
+    only_sharp.clarity = 0.0f;
+    only_sharp.tone = 0.0f;
+    only_sharp.saturation = 1.0f;
+    only_sharp.dither = false;
+    const int o_in = overshoot(readback(d3d, stepup), 51, 204);
+    int o_sharp = 0;
+    for (float a : {defaults.sharpen, 1.0f}) {
+        only_sharp.sharpen = a;
+        o_sharp = std::max(o_sharp, finish_overshoot(only_sharp));
+    }
+    const bool halo_ok = o_sharp <= std::max(1, o_in);
+    enhance::Params only_clar = only_sharp;
+    only_clar.sharpen = 0.0f;
+    only_clar.clarity = 1.0f;
+    enhance::Params dflt = defaults;
+    dflt.tone = 0.0f;
+    dflt.saturation = 1.0f;  // tons et saturation déplacent les niveaux 51/204 sans être des halos
+    log_msg("Amélioration étage B, halo sur un bord net 51 -> 204 : entrée upscalée %d niveau(x), netteté %.2f et 1 : "
+            "%d -> %s ; clarté 1 : %d, netteté+clarté par défaut + dithering : %d (indicatifs)",
+            o_in, defaults.sharpen, o_sharp, halo_ok ? "OK" : "ÉCHEC", finish_overshoot(only_clar),
+            finish_overshoot(dflt));
+
+    // Image de la mire débruitée, upscalée et finie avec les réglages d'origine (à regarder).
+    {
+        LumaPyramid dp;
+        me.build_pyramid(dp, deg.srv.Get(), cap);
+        Enhancer::FinishInputs mfi;
+        mfi.cur = &dp;
+        const GpuTexture& u = up.run(enh.denoise(deg, defaults.denoise), out, UpscaleMode::Bicubic, 0.35f);
+        write_bmp(dir + L"amelioration_finie.bmp", readback(d3d, enh.finish(u, defaults, mfi)));
+    }
+
+    // 3. Coût GPU (réglages d'origine) : étage A en résolution de capture, étage B en sortie.
+    for (int i = 0; i < 30; ++i) {
+        prof.begin_frame(ctx);
+        prof.begin(ctx, GpuSection::Denoise);
+        enh.denoise(deg, defaults.denoise);
+        prof.end(ctx, GpuSection::Denoise);
+        prof.begin(ctx, GpuSection::Finish);
+        enh.finish(stepup, defaults, fi);
+        prof.end(ctx, GpuSection::Finish);
+        prof.end_frame(ctx);
+        ctx->Flush();
+        Sleep(2);
+    }
+    log_msg("GPU : amélioration étage A %ux%u %.3f ms, étage B %ux%u %.3f ms", cap.width, cap.height,
+            prof.ms(GpuSection::Denoise), out.width, out.height, prof.ms(GpuSection::Finish));
+    return den_ok && halo_ok;
 }
 
 }  // namespace
@@ -246,6 +403,10 @@ int run_selftest(const Config& cfg) {
     }
     log_msg("GPU : pyramide %.3f ms, flow aller+retour %.3f ms, synthèse 1440p %.3f ms", prof.ms(GpuSection::Analyze),
             prof.ms(GpuSection::Flow), prof.ms(GpuSection::Compose));
+
+    // --enhance (étages A et B) : qualité mesurée sur la mire, coût GPU.
+    const bool enh_ok = selftest_enhance(d3d, comp, me, up, tp, prof, cap, out, dir);
+    ok = ok && enh_ok;
 
     // RTX VSR : on vérifie que la voie VideoProcessor fonctionne et que le driver accepte l'extension.
     up.run(A, out, UpscaleMode::Vsr, 0.0f);

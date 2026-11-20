@@ -34,7 +34,7 @@ jobs:
         run: cmake --build build --config Release --parallel
 
       # Logique pure seulement : aucune carte de capture ni périphérique audio n'est ouvert dans la CI.
-      - name: Tests CPU (ctest dedupe, scene_cut, tap_protocol, capture_logic, audio_delay)
+      - name: Tests CPU (ctest dedupe, scene_cut, tap_protocol, capture_logic, audio_delay, audio_sync, enhance)
         working-directory: build
         run: ctest -C Release --output-on-failure
 
@@ -68,7 +68,7 @@ jobs:
           $out += ''
           if (Test-Path $log) {
             $lines = Get-Content -Encoding UTF8 $log |
-              Where-Object { $_ -match 'PSNR|dB|SELFTEST|Device D3D11|GPU :|Upscale|fonctionnalité|Erreur|HRESULT' }
+              Where-Object { $_ -match 'PSNR|dB|SELFTEST|Device D3D11|GPU :|Upscale|Amélioration|fonctionnalité|Erreur|HRESULT' }
             if ($lines) {
               $out += '```'
               $out += $lines

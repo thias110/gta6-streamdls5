@@ -151,6 +151,10 @@ add_executable(rpenhance_audio_sync_tests tests/audio_sync_test.cpp src/capture/
                src/capture/audio_format.cpp)
 target_include_directories(rpenhance_audio_sync_tests PRIVATE src)
 add_test(NAME audio_sync COMMAND rpenhance_audio_sync_tests)
+# Amélioration d'image (--enhance) : bornes, courbes, lissage, références CPU des filtres (bilatéral, netteté).
+add_executable(rpenhance_enhance_tests tests/enhance_test.cpp src/pipeline/enhance_logic.cpp)
+target_include_directories(rpenhance_enhance_tests PRIVATE src)
+add_test(NAME enhance COMMAND rpenhance_enhance_tests)
 
 # Émetteur de test du frame tap (copie adaptée de l'émetteur MIT de SmoovPlay) : alimente
 # `rpenhance --selftest-tap` dans la CI (voir .github/workflows/windows-build.yml). Programme console.

@@ -62,6 +62,16 @@ float luma(const float rgb[3]);
 // (la clarté est ignorée : elle dépend de la pyramide de luminance GPU). Bords : texels répétés.
 Image8 finish_ref(const Image8& src, const Params& p);
 
+// ----- Mesures et dégradation de test (selftest, tests/enhance_test.cpp) --------------------------------------
+// Dégradation façon compression : par bloc 8x8 aligné et par composante, DCT, quantification uniforme (pas 8
+// pour la composante continue, q (1 + (u + v) / 2) ailleurs), DCT inverse ; puis bruit gaussien d'écart-type
+// `noise` (niveaux sur 255) sur tous les pixels. q <= 0 : pas de quantification. Générateur pseudo-aléatoire maison : même image sous MSVC et g++.
+Image8 degrade_blocks(const Image8& src, float q, float noise, uint32_t seed);
+// PSNR (dB) sur R, G, B ; 99 si identiques.
+double psnr(const Image8& ref, const Image8& test);
+// SSIM simple sur la luminance (fenêtres 8x8 disjointes, constantes usuelles K1 = 0.01, K2 = 0.03), moyenne.
+double ssim(const Image8& ref, const Image8& test);
+
 // ----- Lissage des réglages --------------------------------------------------------------------------------
 // Les changements (curseurs de l'overlay, activation) sont amenés en douceur (constante de temps tau) pour éviter
 // un saut visible d'une image à l'autre. Premier appel, ou pause > 1 s : valeurs prises telles quelles.

@@ -60,6 +60,10 @@ public:
     // Lecture immédiate (attend le GPU) : begin_measure + read_measure(wait = true). Pour le selftest.
     DiffResult measure_difference(const LumaPyramid& a, const LumaPyramid& b);
     // Flow X -> Y en UV normalisés sur la grille de blocs 8x8 du niveau 0 (R32G32F).
+    // R16G16F écarté : en UV, le pas d'un half vaut taille x 2^-11 à 2^-12 pour |flow| de 0,25 à 1
+    // (0,16 à 0,63 px au niveau 0 d'une capture 1440p, le double en sortie), ce qui écrase le
+    // sous-pixel des mouvements rapides ; et la grille 8x8 est petite (160x90 en 1440p, ~115 Ko par
+    // texture) : le gain de bande passante serait négligeable.
     // `temporal` : flow de la paire précédente (prédicteur), multiplié par temporal_sign.
     void estimate_flow(const LumaPyramid& x, const LumaPyramid& y, ID3D11ShaderResourceView* temporal,
                        float temporal_sign, GpuTexture& out);

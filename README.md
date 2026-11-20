@@ -102,7 +102,8 @@ compile avec MSVC sur `windows-latest` (sans SDK NVIDIA), lance `ctest` puis
 `rpenhance.exe --selftest --warp` : le selftest tourne sur WARP, le rendu logiciel D3D11, car le
 runner n'a pas de GPU. Cette étape ne bloque pas encore le job ; `rpenhance.log` et les images
 sont dans l'artefact `selftest-warp`, les PSNR dans le résumé du run. Sur WARP, les temps GPU ne
-veulent rien dire.
+veulent rien dire. Le test du frame tap (`tap_writer` + `--selftest-tap --warp`) est en revanche
+bloquant ; ses journaux sont dans `tap-logs/` du même artefact.
 
 ## Utiliser
 
@@ -134,6 +135,57 @@ Options : `rpenhance.exe --help`. Les plus utiles :
 | `--capturable` | l'overlay reste visible des captures d'écran (OBS, partage) |
 
 Le journal est écrit dans `rpenhance.log` à côté de l'exe (stats toutes les 5 s).
+
+## Source « frame tap » (expérimental)
+
+Au lieu de capturer la fenêtre de la remote play (WGC, qui passe par le compositeur DWM et ajoute sa
+latence), rpenhance peut lire des frames **déjà décodées** qu'un autre programme dépose dans une
+mémoire partagée, au format « frame tap » **version 2** de SmoovPlay (spécification MIT :
+[docs/frame-tap.md de SmoovPlay](https://github.com/smoovplay/smoovplay/blob/main/docs/frame-tap.md)).
+
+```powershell
+.\build\Release\rpenhance.exe --source tap                       # mémoire Local\smoovplay-tap
+.\build\Release\rpenhance.exe --source tap --tap-name Local\autre  # autre nom
+```
+
+| Option | Effet |
+|---|---|
+| `--source wgc\|tap` | `wgc` (défaut, inchangé) : capture de fenêtre ; `tap` : frame tap |
+| `--tap-name NOM` | nom de la mémoire partagée (défaut `Local\smoovplay-tap`) ; l'event est `NOM-frame` |
+| `--tap-trust-flags` | le pipeline croit les métadonnées de l'émetteur (désactivé par défaut, voir plus bas) |
+| `--selftest-tap` | contrôle automatique avec `tap_writer` (voir « Tester sans PS5 ») |
+
+Ce qui est lu :
+
+- mémoire `CreateFileMappingW` de 4096 + 64 Mio créée ou ouverte (l'émetteur peut démarrer avant ou
+  après), event auto-reset `NOM-frame` attendu par la boucle (pas d'attente active) ;
+- en-tête `CFTP`, **version 2 obligatoire** : une version 1 (frames compressées H.264/H.265) est
+  refusée avec un message explicite dans le journal ; `session` suivie (nouveau flux = suivi remis à
+  zéro) ; `reader_heartbeat` écrit à chaque lecture ;
+- NV12 ou BGRA, lignes tassées. NV12 : Y et Cb/Cr envoyés au GPU (R8 / R8G8) puis convertis en BGRA
+  par shader, matrice selon `colour` (0 auto : BT.709 à partir de 720 lignes, BT.601 en dessous,
+  plage limitée ; 1 à 4 explicites), chrominance 4:2:0 interpolée (placement H.264 par défaut) ;
+- lecture sans jamais bloquer l'émetteur : la frame la plus récente seulement (les autres sont
+  sautées si rpenhance est en retard), `seq` du slot relu après la copie et frame abandonnée si le
+  slot a été réécrit entre-temps ;
+- `qpc_arrival` converti en secondes sur la même horloge QPC que le reste du pipeline : le retard
+  d'arrivée mesuré part de l'arrivée de la frame chez l'émetteur.
+
+Métadonnées des slots (`flags` : bit 0 tronquée, bit 1 répétition, bit 2 nouveau contenu ;
+`frames_lost` ; `recovered`) : toujours journalisées/exposées par la source, mais **utilisées par le
+pipeline seulement avec `--tap-trust-flags`** : répétition = doublon sans mesure ; nouveau contenu =
+image unique sans passer par le classement des doublons ; `frames_lost > 0` ou frame tronquée = pas
+d'interpolation vers ni depuis cette frame (l'image est tenue) ; `recovered` ou nouvelle session =
+historique vidé. Sans l'option, le pipeline se comporte exactement comme avec WGC.
+
+Limites :
+
+- **chiaki-ng émet aujourd'hui des frames compressées (version 1)** via son patch frame tap (AGPL) :
+  rpenhance ne les décode pas et refuse ce flux. La version 2 suppose un **autre émetteur** qui
+  dépose des frames décodées (aucun n'existe pour PS Remote Play à ce jour).
+- **Aucune frame réelle n'a été testée** : seulement l'émetteur synthétique `tests/tap_writer.cpp`.
+- Feature 8 (frames envoyées seulement quand l'image change) : pas de recalage dédié sur 60 Hz, les
+  frames sont traitées à leur arrivée. Pas de son (l'anneau `-audio` est ignoré), pas de HDR.
 
 ## Backend optionnel : NVIDIA Video Effects SDK (VFG / VSR)
 
@@ -221,6 +273,18 @@ affichée. Ces chiffres datent d'avant la branche `feat/robustesse-qualite` (mes
 masque de bords, `--flow-scale`) : à remesurer. Le selftest journalise aussi la qualité avec et sans
 protection du HUD et avec `--flow-scale 0.5`.
 
+Frame tap sans PS5 : `tap_writer` (émetteur de test, copie adaptée de l'émetteur MIT de SmoovPlay)
+envoie deux sessions de frames NV12 ou BGRA, avec arrêt puis redémarrage ; `--selftest-tap` les lit,
+relit chaque image convertie et vérifie numéro de frame, couleurs, drapeaux et sessions (code 0/1).
+
+```powershell
+Start-Process .\build\Release\rpenhance.exe '--selftest-tap','--tap-name','Local\rpenhance-tap-test'
+.\build\Release\tap_writer.exe --format nv12 --name Local\rpenhance-tap-test   # ou --format bgra
+Get-Content .\build\Release\rpenhance.log   # « SELFTEST TAP OK » attendu
+```
+
+La CI Windows lance ce test sur WARP (NV12 720p, NV12 480p, BGRA 720p) et échoue s'il ne passe pas.
+
 ## Limites connues
 
 - Les modifications de la branche `feat/robustesse-qualite` (seuil adaptatif, coupures, HUD, lecture
@@ -263,7 +327,8 @@ protection du HUD et avec `--flow-scale 0.5`.
 
 - Modèle RIFE (ONNX Runtime + DirectML ou TensorRT) à la place de l'estimateur par blocs, avec la
   même mire pour mesurer le gain.
-- Récupérer les frames décodées directement dans chiaki (moins de latence que WGC).
+- Un émetteur de frames décodées (frame tap v2) côté client remote play, pour profiter de la source
+  `--source tap` (moins de latence que WGC) ; aujourd'hui seul l'émetteur de test existe.
 - Rendre et présenter avant le travail lourd d'une nouvelle frame unique (pour ne pas rater un vblank à
   144/240 Hz) : pas fait sans mesure. Le travail lourd (upscale + flow) part souvent de `render()`
   lui-même (`resolve_pending`), pas seulement de `submit()` ; inverser l'ordre dans la boucle ajouterait

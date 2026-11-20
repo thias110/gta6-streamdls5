@@ -42,6 +42,12 @@ fenêtre Remote Play ──WGC──► recadrage zone client 16:9
   pyramide, propagation des vecteurs entre voisins, médiane, flow bidirectionnel, synthèse avec
   gestion des occlusions et des éléments fixes (HUD, sous-titres). Elle cale l'affichage sur le
   rafraîchissement de **ton** écran (60, 144, 240 Hz...), pas sur un multiplicateur fixe.
+- **Changements de plan** : en plus de la différence moyenne (critère d'origine), corrélation de la
+  luminance par blocs de ~32 px (meilleure de 9 décalages d'un bloc, pour ignorer le mouvement de
+  caméra) et distance d'histogrammes, calculées sur le niveau le plus grossier de la pyramide. La
+  corrélation ne dépend pas de la luminosité : elle repère les coupures entre deux plans sombres.
+  Sur une coupure, pas d'interpolation : l'image précédente est tenue (**HOLD**) jusqu'à l'instant
+  de la nouvelle. `--simple-cuts` revient au seul critère d'origine.
 - **Overlay** : fenêtre plein écran au-dessus de la remote play, qui ne prend **jamais le focus**.
   La manette reste donc branchée sur la remote play.
 
@@ -91,6 +97,7 @@ Options : `rpenhance.exe --help`. Les plus utiles :
 | `--no-fg` | pas d'interpolation : latence minimale, VRR/tearing autorisé |
 | `--dup-threshold 1.2` | seuil de base des doublons (seuil fixe avec `--no-adaptive-dedupe`) |
 | `--no-adaptive-dedupe` | désactive le seuil adaptatif et le verrou de rythme |
+| `--simple-cuts` | coupures détectées sur la seule différence moyenne |
 | `--delay 1.15` | marge du retard ; à monter si l'image saccade quand le réseau varie |
 | `--windowed` | fenêtre classique au lieu de l'overlay |
 | `--monitor 1` | overlay sur un autre écran |
@@ -129,6 +136,10 @@ affichée.
   (`tests/dedupe_test.cpp`) ont été vérifiées. À compiler et valider sur Windows (`--selftest`,
   `--test-pattern`) avant usage.
 
+- Détection de coupure : une caméra très rapide (plus d'environ 50 px entre deux images uniques en
+  1080p) ou deux plans de disposition semblable peuvent tromper la corrélation ; dans le premier cas
+  on tient l'image au lieu d'interpoler (saccade ponctuelle), dans le second l'interpolation passe
+  comme avant. Seuils ajustables dans l'overlay (« Changements de plan »).
 - La latence : voir l'avertissement en haut. Coupe la frame generation (Ctrl+Alt+F) pour viser.
 - L'interpolation par blocs bave sur les rotations rapides et les objets très fins ; les zones en
   désaccord retombent sur la frame la plus proche plutôt que de produire un fantôme.

@@ -45,6 +45,7 @@ add_executable(rpenhance WIN32
     src/pipeline/compositor.cpp
     src/pipeline/motion.cpp
     src/pipeline/dedupe.cpp
+    src/pipeline/scene_cut.cpp
     src/pipeline/upscaler.cpp
     src/pipeline/pipeline.cpp
     src/present/swapchain.cpp
@@ -66,3 +67,6 @@ enable_testing()
 add_executable(rpenhance_tests tests/dedupe_test.cpp src/pipeline/dedupe.cpp)
 target_include_directories(rpenhance_tests PRIVATE src)
 add_test(NAME dedupe COMMAND rpenhance_tests)
+add_executable(rpenhance_cut_tests tests/scene_cut_test.cpp src/pipeline/scene_cut.cpp)
+target_include_directories(rpenhance_cut_tests PRIVATE src)
+add_test(NAME scene_cut COMMAND rpenhance_cut_tests)

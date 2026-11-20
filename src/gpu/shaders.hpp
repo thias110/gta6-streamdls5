@@ -159,6 +159,90 @@ void cs_tile_diff(uint3 id : SV_DispatchThreadID, uint3 gid : SV_GroupID, uint g
 )HLSL";
 
 // ---------------------------------------------------------------------------------------------
+// Statistiques de changement de plan sur le niveau le plus grossier de la pyramide (chaque texel =
+// moyenne d'un bloc de ~32x32 pixels) : sommes pour la corrélation de luminance par blocs, testée
+// sous 9 décalages d'un bloc (le mouvement ordinaire ne la fait pas chuter), et histogrammes 32 cases.
+// La corrélation ignore la luminosité globale : elle reste parlante entre deux plans sombres.
+// Un seul groupe de 256 threads. Sortie (uint, à partir de l'octet 16 du tampon de mesure) :
+//   [4] n  [5] somme a  [6] somme b  [7] somme a2  [8] somme b2  [9..17] somme a*b(décalage)  (floats)
+//   [18..49] histogramme a  [50..81] histogramme b
+inline constexpr char kCutStats[] = R"HLSL(
+Texture2D<float>    g_ca   : register(t0);
+Texture2D<float>    g_cb   : register(t1);
+RWByteAddressBuffer g_cout : register(u0);
+cbuffer CutCB : register(b0) {
+    uint2 g_csize;
+    uint2 g_cpad;
+};
+#define CUT_BINS 32
+groupshared float gs_red[256];
+groupshared uint  gs_ha[CUT_BINS];
+groupshared uint  gs_hb[CUT_BINS];
+
+float reduce256(float v, uint gi) {
+    gs_red[gi] = v;
+    GroupMemoryBarrierWithGroupSync();
+    [unroll] for (uint s = 128; s > 0; s >>= 1) {
+        if (gi < s) gs_red[gi] += gs_red[gi + s];
+        GroupMemoryBarrierWithGroupSync();
+    }
+    float r = gs_red[0];
+    GroupMemoryBarrierWithGroupSync();
+    return r;
+}
+
+[numthreads(256, 1, 1)]
+void cs_cut_stats(uint gi : SV_GroupIndex) {
+    if (gi < CUT_BINS) {
+        gs_ha[gi] = 0;
+        gs_hb[gi] = 0;
+    }
+    GroupMemoryBarrierWithGroupSync();
+
+    int2  hi = int2(g_csize) - 1;
+    uint  total = g_csize.x * g_csize.y;
+    float sa = 0.0, sb = 0.0, saa = 0.0, sbb = 0.0;
+    float sab[9] = {0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0};
+    for (uint i = gi; i < total; i += 256) {
+        int2  p = int2(i % g_csize.x, i / g_csize.x);
+        float a = g_ca.Load(int3(p, 0));
+        float b = g_cb.Load(int3(p, 0));
+        sa += a;
+        sb += b;
+        saa += a * a;
+        sbb += b * b;
+        [unroll] for (int k = 0; k < 9; ++k) {
+            int2 o = int2(k % 3 - 1, k / 3 - 1);
+            sab[k] += a * g_cb.Load(int3(clamp(p + o, 0, hi), 0));
+        }
+        uint dummy;
+        InterlockedAdd(gs_ha[min(uint(saturate(a) * CUT_BINS), CUT_BINS - 1)], 1, dummy);
+        InterlockedAdd(gs_hb[min(uint(saturate(b) * CUT_BINS), CUT_BINS - 1)], 1, dummy);
+    }
+
+    float r_sa  = reduce256(sa, gi);
+    float r_sb  = reduce256(sb, gi);
+    float r_saa = reduce256(saa, gi);
+    float r_sbb = reduce256(sbb, gi);
+    float r_sab[9];
+    [unroll] for (int k = 0; k < 9; ++k) r_sab[k] = reduce256(sab[k], gi);
+
+    if (gi == 0) {
+        g_cout.Store(16, asuint(float(total)));
+        g_cout.Store(20, asuint(r_sa));
+        g_cout.Store(24, asuint(r_sb));
+        g_cout.Store(28, asuint(r_saa));
+        g_cout.Store(32, asuint(r_sbb));
+        [unroll] for (int k = 0; k < 9; ++k) g_cout.Store(36 + 4 * k, asuint(r_sab[k]));
+    }
+    if (gi < CUT_BINS) {
+        g_cout.Store(72 + 4 * gi, gs_ha[gi]);
+        g_cout.Store(72 + 4 * CUT_BINS + 4 * gi, gs_hb[gi]);
+    }
+}
+)HLSL";
+
+// ---------------------------------------------------------------------------------------------
 // Estimation de mouvement par blocs 8x8, grossier -> fin.
 // Flow en UV normalisés : X(p) ~ Y(p + flow).
 inline constexpr char kMotion[] = R"HLSL(

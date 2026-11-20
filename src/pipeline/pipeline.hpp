@@ -15,8 +15,9 @@ struct PipelineSettings {
     float       dup_threshold = 1.2f;   // seuil de base (fixe si adaptive_dedupe est faux)
     bool        adaptive_dedupe = true; // seuil qui suit le bruit de fond + verrou de rythme 2/3
     float       delay_scale   = 1.15f;
-    float       cut_threshold = 40.0f;  // différence moyenne |dY| (0-255) au-delà de laquelle on suppose un
-                                        // changement de plan : pas de flow, pas d'interpolation
+    // Changement de plan (différence moyenne > cut.mean_max, ou corrélation des blocs / histogrammes) :
+    // pas de flow, et HOLD : la frame précédente reste affichée jusqu'à l'instant de la nouvelle.
+    CutParams   cut;
     bool        compare       = false;  // moitié gauche = capture brute
     bool        flow_viz      = false;
     SynthParams synth;
@@ -34,6 +35,8 @@ struct PipelineInfo {
     float          delay_ms      = 0.0f;  // retard d'affichage imposé par l'interpolation
     float          arrival_ms    = 0.0f;  // retard moyen d'arrivée des captures (horodatage -> soumission)
     uint64_t       scene_cuts    = 0;
+    float          cut_corr      = 1.0f;  // dernière corrélation des blocs (-1..1)
+    float          cut_hist      = 0.0f;  // dernière distance d'histogrammes (0..1)
     float          last_alpha    = 0.0f;
     bool           interpolating = false;
     uint64_t       unique_frames = 0;
@@ -71,6 +74,7 @@ private:
         LumaPyramid pyr;
         GpuTexture  raw, up, flow_fwd, flow_bwd;  // flow_fwd : précédente -> celle-ci
         bool        has_flow = false;
+        bool        cut_before = false;  // changement de plan entre la précédente et celle-ci : HOLD
         bool        has_raw  = false;  // copie brute (mode comparaison uniquement)
     };
     UniqueFrame* newest();

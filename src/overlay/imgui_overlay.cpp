@@ -60,6 +60,7 @@ void ImguiOverlay::render(ID3D11RenderTargetView* rtv, const OverlayModel& m, Pi
             ImGui::Text("retard FG  %5.1f ms   (latence ajoutée par l'interpolation)", info.delay_ms);
         ImGui::Text("arrivée    %5.1f ms   changements de plan %llu", info.arrival_ms,
                     static_cast<unsigned long long>(info.scene_cuts));
+        ImGui::TextDisabled("coupure    corr. blocs %+.2f   dist. histo %.2f", info.cut_corr, info.cut_hist);
 
         const float thr = info.dup_threshold > 0.0f ? info.dup_threshold : set.dup_threshold;
         if (set.dedupe && set.adaptive_dedupe) {
@@ -102,6 +103,13 @@ void ImguiOverlay::render(ID3D11RenderTargetView* rtv, const OverlayModel& m, Pi
             ImGui::SliderFloat("fixe max", &set.synth.static_hi, 0.0f, 0.3f);
             ImGui::SliderFloat("désaccord min", &set.synth.err_lo, 0.0f, 0.3f);
             ImGui::SliderFloat("désaccord max", &set.synth.err_hi, 0.0f, 0.6f);
+        }
+        if (ImGui::CollapsingHeader("Changements de plan (avancé)")) {
+            ImGui::Checkbox("Corrélation + histogramme (plans sombres)", &set.cut.enabled);
+            ImGui::SliderFloat("diff. moyenne max", &set.cut.mean_max, 5.0f, 100.0f, "%.0f");
+            ImGui::SliderFloat("corrélation max", &set.cut.corr_max, -0.5f, 0.9f, "%.2f");
+            ImGui::SliderFloat("distance histo min", &set.cut.hist_min, 0.0f, 1.0f, "%.2f");
+            ImGui::SliderFloat("corrélation seule max", &set.cut.corr_strong, -0.5f, 0.5f, "%.2f");
         }
 
         ImGui::Separator();

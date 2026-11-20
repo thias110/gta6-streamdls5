@@ -1,6 +1,7 @@
 #pragma once
 #include "../gpu/d3d_context.hpp"
 #include "compositor.hpp"
+#include "scene_cut.hpp"
 
 inline constexpr uint32_t kFlowBlock = 8;  // taille des blocs du flow (BS dans kMotion)
 
@@ -24,8 +25,9 @@ struct LumaPyramid {
 };
 
 struct DiffResult {
-    float max_tile = 0.0f;  // plus forte différence moyenne d'une tuile (échelle 0-255)
-    float mean     = 0.0f;
+    float       max_tile = 0.0f;  // plus forte différence moyenne d'une tuile (échelle 0-255)
+    float       mean     = 0.0f;
+    CutStatsRaw cut;              // sommes de cs_cut_stats (niveau le plus grossier), voir scene_cut.hpp
 };
 
 // Noyaux compute : pyramide, détection de doublons, estimation de mouvement.
@@ -42,7 +44,8 @@ public:
 
 private:
     D3DContext*                         d3d_ = nullptr;
-    ComPtr<ID3D11ComputeShader>         cs_luma_rgb_, cs_luma_down_, cs_diff_, cs_motion_, cs_propagate_, cs_median_;
+    ComPtr<ID3D11ComputeShader>         cs_luma_rgb_, cs_luma_down_, cs_diff_, cs_cut_, cs_motion_, cs_propagate_,
+                                        cs_median_;
     ComPtr<ID3D11Buffer>                diff_buf_, diff_staging_;
     ComPtr<ID3D11UnorderedAccessView>   diff_uav_;
     std::vector<GpuTexture>             level_flow_, level_tmp_;

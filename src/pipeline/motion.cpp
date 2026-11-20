@@ -1,6 +1,16 @@
 #include "motion.hpp"
 #include "../gpu/shaders.hpp"
 
+namespace {
+// Tampon de mesure : [0] max tuile, [1] somme, [2] nb tuiles (cs_tile_diff) ; à partir de [4] les
+// statistiques de coupure (cs_cut_stats) : n, sa, sb, saa, sbb, sab[9], histogrammes a puis b.
+constexpr UINT kCutFirst  = 4;
+constexpr UINT kCutHistA  = kCutFirst + 5 + kCutShifts;  // 18
+constexpr UINT kCutHistB  = kCutHistA + kCutBins;        // 50
+constexpr UINT kDiffBytes = 512;
+static_assert((kCutHistB + kCutBins) * 4 <= kDiffBytes);
+}  // namespace
+
 void LumaPyramid::ensure(ID3D11Device* dev, Size2D src) {
     if (src == source && !levels.empty()) return;
     levels.clear();
@@ -21,13 +31,14 @@ void MotionEngine::init(D3DContext& d3d) {
     cs_luma_rgb_  = d3d.make_cs(shaders::kLuma, "cs_luma_from_rgb");
     cs_luma_down_ = d3d.make_cs(shaders::kLuma, "cs_luma_down");
     cs_diff_      = d3d.make_cs(shaders::kTileDiff, "cs_tile_diff");
+    cs_cut_       = d3d.make_cs(shaders::kCutStats, "cs_cut_stats");
     cs_motion_    = d3d.make_cs(shaders::kMotion, "cs_motion_search");
     cs_propagate_ = d3d.make_cs(shaders::kMotion, "cs_motion_propagate");
     cs_median_    = d3d.make_cs(shaders::kMedian, "cs_flow_median");
 
     auto* dev = d3d.device();
     D3D11_BUFFER_DESC bd{};
-    bd.ByteWidth = 16;
+    bd.ByteWidth = kDiffBytes;
     bd.Usage     = D3D11_USAGE_DEFAULT;
     bd.BindFlags = D3D11_BIND_UNORDERED_ACCESS;
     bd.MiscFlags = D3D11_RESOURCE_MISC_BUFFER_ALLOW_RAW_VIEWS;
@@ -36,7 +47,7 @@ void MotionEngine::init(D3DContext& d3d) {
     D3D11_UNORDERED_ACCESS_VIEW_DESC ud{};
     ud.Format              = DXGI_FORMAT_R32_TYPELESS;
     ud.ViewDimension       = D3D11_UAV_DIMENSION_BUFFER;
-    ud.Buffer.NumElements  = 4;
+    ud.Buffer.NumElements  = kDiffBytes / 4;
     ud.Buffer.Flags        = D3D11_BUFFER_UAV_FLAG_RAW;
     check_hr(dev->CreateUnorderedAccessView(diff_buf_.Get(), &ud, &diff_uav_), "diff uav");
 
@@ -78,7 +89,7 @@ void MotionEngine::build_pyramid(LumaPyramid& pyr, ID3D11ShaderResourceView* rgb
 }
 
 DiffResult MotionEngine::measure_difference(const LumaPyramid& a, const LumaPyramid& b) {
-    if (!a.valid() || !b.valid() || !(a.source == b.source)) return {255.0f, 255.0f};
+    if (!a.valid() || !b.valid() || !(a.source == b.source)) return {255.0f, 255.0f, {}};
     auto* ctx = d3d_->ctx();
     const size_t lvl = std::min<size_t>(1, a.levels.size() - 1);  // quart de résolution
     const GpuTexture& la = a.levels[lvl];
@@ -99,6 +110,21 @@ DiffResult MotionEngine::measure_difference(const LumaPyramid& a, const LumaPyra
     ctx->Dispatch(div_up(la.width, 16), div_up(la.height, 16), 1);
     d3d_->unbind_cs();
 
+    // Statistiques de coupure sur le niveau le plus grossier (même taille dans a et b).
+    const GpuTexture& ca = a.levels.back();
+    const GpuTexture& cb_ = b.levels.back();
+    struct {
+        uint32_t w, h, p0, p1;
+    } ccb{ca.width, ca.height, 0, 0};
+    ID3D11Buffer* cbuf = d3d_->constants(ccb);
+    ctx->CSSetConstantBuffers(0, 1, &cbuf);
+    ID3D11ShaderResourceView* csrvs[2] = {ca.srv.Get(), cb_.srv.Get()};
+    ctx->CSSetShaderResources(0, 2, csrvs);
+    ctx->CSSetUnorderedAccessViews(0, 1, &uav, nullptr);
+    ctx->CSSetShader(cs_cut_.Get(), nullptr, 0);
+    ctx->Dispatch(1, 1, 1);
+    d3d_->unbind_cs();
+
     ctx->CopyResource(diff_staging_.Get(), diff_buf_.Get());
     D3D11_MAPPED_SUBRESOURCE m{};
     check_hr(ctx->Map(diff_staging_.Get(), 0, D3D11_MAP_READ, 0, &m), "Map diff");
@@ -106,6 +132,16 @@ DiffResult MotionEngine::measure_difference(const LumaPyramid& a, const LumaPyra
     DiffResult r;
     r.max_tile = float(v[0]) / 1000.0f;
     r.mean     = v[2] ? float(v[1]) / 1000.0f / float(v[2]) : 0.0f;
+    float f[5 + kCutShifts];
+    std::memcpy(f, v + kCutFirst, sizeof(f));
+    r.cut.n   = f[0];
+    r.cut.sa  = f[1];
+    r.cut.sb  = f[2];
+    r.cut.saa = f[3];
+    r.cut.sbb = f[4];
+    std::memcpy(r.cut.sab, f + 5, sizeof(r.cut.sab));
+    std::memcpy(r.cut.ha, v + kCutHistA, sizeof(r.cut.ha));
+    std::memcpy(r.cut.hb, v + kCutHistB, sizeof(r.cut.hb));
     ctx->Unmap(diff_staging_.Get(), 0);
     return r;
 }

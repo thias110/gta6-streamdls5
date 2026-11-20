@@ -77,8 +77,11 @@ bool Pipeline::submit(const SourceFrame& f, double arrival) {
                 info_.cadence_period = dec.period;
             }
         }
-        // Changement de plan : le flow n'a pas de sens, on évitera d'interpoler à travers.
-        cut = d.mean > settings.cut_threshold;
+        // Changement de plan : le flow n'a pas de sens, on n'interpolera pas à travers (HOLD).
+        const CutFeatures cf = cut_features(d.cut);
+        cut            = is_scene_cut(d.mean, cf, settings.cut);
+        info_.cut_corr = cf.corr;
+        info_.cut_hist = cf.hist;
     }
     prof_.end(ctx, GpuSection::Analyze);
     if (last && f.time <= last->time) unique = false;  // horodatage non monotone
@@ -116,6 +119,7 @@ bool Pipeline::submit(const SourceFrame& f, double arrival) {
     slot.prev_id  = 0;
     slot.time     = f.time;
     slot.has_flow = false;
+    slot.cut_before = last && cut;
     ++info_.unique_frames;
 
     // 3. Cadence + flow bidirectionnel avec la frame unique précédente.
@@ -193,7 +197,12 @@ bool Pipeline::render(ID3D11RenderTargetView* rtv, const D3D11_VIEWPORT& vp, dou
             const double span = b->time - a->time;
             const float  t    = float((target - a->time) / span);
             ref = t < 0.5f ? a : b;
-            if (b->has_flow && b->prev_id == a->id && span < 0.25) {
+            if (b->cut_before) {
+                // HOLD : interpoler (ou basculer à mi-chemin) à travers une coupure donnerait un fondu
+                // fantôme ou une coupure en avance ; A reste affichée jusqu'à l'instant de B.
+                ref = a;
+                comp_.blit(a->up.srv.Get());
+            } else if (b->has_flow && b->prev_id == a->id && span < 0.25) {
                 comp_.synth(a->up.srv.Get(), b->up.srv.Get(), b->flow_fwd.srv.Get(), b->flow_bwd.srv.Get(), t,
                             settings.synth, b->pyr.flow_scale());
                 generated        = t > 0.05f && t < 0.95f;  // sinon quasi identique à une vraie frame

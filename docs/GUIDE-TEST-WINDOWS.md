@@ -1,7 +1,7 @@
 # Guide : compiler et tester rpenhance sous Windows
 
-> **État honnête.** Le code des branches `fix/timing-grid`, `feat/robustesse-qualite` et
-> `feat/nvidia-vfx` a été écrit et relu sans compilateur MSVC ni GPU : seule la syntaxe et la logique CPU
+> **État honnête.** Le code des branches `fix/timing-grid`, `feat/robustesse-qualite`,
+> `feat/nvidia-vfx` et `perf/flow` a été écrit et relu sans compilateur MSVC ni GPU : seule la syntaxe et la logique CPU
 > (`tests/`) ont été vérifiées hors Windows. Ce guide sert à **valider pour de vrai**. Note chaque
 > résultat, y compris les échecs : c'est ce qui permet de corriger.
 
@@ -154,7 +154,46 @@ ou plus**. Le VSR marche aussi sur RTX 20/30.
 
 6. **Ne publie jamais** le dossier `third_party\`, des DLL ou des modèles NVIDIA, ni une clé.
 
-## 7. Comparer avec les autres outils
+## 7. Comparer les temps GPU du flow : `feat/nvidia-vfx` contre `perf/flow`
+
+La branche `perf/flow` (locale tant qu'elle n'est pas publiée) optimise l'estimation de mouvement
+**sans changer son résultat attendu** : SAD des blocs en `GatherRed` (32 lectures de texture par
+vecteur candidat au lieu de 128) et flow aller + retour dans les mêmes Dispatch (17 au lieu de 34 par
+frame unique avec 5 niveaux de pyramide). Ces chiffres sont des **comptes faits en lisant le code**,
+pas des mesures : seul ce test dira si le GPU va plus vite. Comme le reste, cette branche n'a été ni
+compilée avec MSVC ni lancée sur GPU (syntaxe HLSL vérifiée avec dxc en profil 6_0 ; l'appli compile
+en 5_0 avec FXC, à vérifier ici).
+
+1. Compile et lance le selftest **5 fois** sur chaque branche, même build (Release), PC au repos
+   (navigateur et jeux fermés, même mode d'alimentation) :
+
+   ```powershell
+   git checkout feat/nvidia-vfx
+   .\build.ps1
+   1..5 | % { .\build\Release\rpenhance.exe --selftest | Out-Null; Select-String 'GPU : pyramide|PSNR frame du milieu|flow-scale 0.5|SELFTEST' .\build\Release\rpenhance.log }
+
+   git checkout perf/flow
+   .\build.ps1
+   1..5 | % { .\build\Release\rpenhance.exe --selftest | Out-Null; Select-String 'GPU : pyramide|PSNR frame du milieu|flow-scale 0.5|SELFTEST' .\build\Release\rpenhance.log }
+   ```
+
+2. Note pour chaque lancement la valeur **« flow aller+retour … ms »** de la ligne
+   `GPU : pyramide …` (moyenne lissée des 60 itérations de fin de selftest). `| Out-Null` fait
+   attendre la fin de l'exe ; le journal est réécrit à chaque lancement. Compare les **médianes** des 5 lancements :
+   un écart de moins de ~5 % est du bruit.
+3. **La qualité ne doit pas bouger** : les PSNR (« PSNR frame du milieu », « flow-scale 0.5 »,
+   « protection du HUD ») doivent être **identiques** entre les deux branches (même calcul, même ordre
+   des sommes), et `SELFTEST OK` sur les deux. Un écart de plus de 0,05 dB veut dire que
+   l'optimisation a changé le calcul : envoie les deux journaux, c'est un bug.
+4. Compare aussi `selftest\flow.bmp` des deux branches (doit être identique à l'œil).
+5. En usage réel (étape 5), l'overlay affiche `flow x.xx` (ms GPU) : compare sur la même scène.
+
+Points à surveiller spécifiquement sur `perf/flow` : une erreur FXC à la compilation des shaders
+`cs_motion_search`, `cs_motion_propagate` ou `cs_flow_median` au démarrage (copie le message du
+journal) ; avec `--debug` (couche de debug D3D11, si installée), un avertissement sur des ressources
+liées à la fois en lecture et en écriture.
+
+## 8. Comparer avec les autres outils
 
 Pour savoir si rpenhance fait mieux (Veyra, SmoovPlay, Lossless Scaling) : même jeu, même scène
 (rotation rapide de la caméra, végétation, HUD), même réglage Remote Play (1080p, 60 fps), mêmes
@@ -164,7 +203,7 @@ conditions réseau (Ethernet de préférence). Compare :
 - la **latence** : au minimum à la main, idéalement avec une caméra qui filme manette et écran ;
 - la **stabilité** sur 30 minutes (pas de plantage ni de fuite mémoire GPU).
 
-## 8. Quoi me renvoyer
+## 9. Quoi me renvoyer
 
 Pour chaque étape : réussie ou non, la première erreur complète si échec, le contenu utile de
 `rpenhance.log` (jamais de clé), et ton ressenti en jeu (fluidité, latence, artefacts). Avec ça, on

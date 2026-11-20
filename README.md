@@ -242,11 +242,23 @@ protection du HUD et avec `--flow-scale 0.5`.
   `NvCVImage_InitFromD3DTexture`/`Transfer` sur des textures BGRA de rpenhance, synchronisation réelle,
   qualité et coût de VFG sur le flux Remote Play, URL de l'API NGC et structure de l'archive du SDK.
 
+- Branche `perf/flow` (optimisation de l'estimation de mouvement : SAD en `GatherRed`, flow aller +
+  retour dans les mêmes Dispatch) : écrite sans MSVC ni GPU, syntaxe HLSL vérifiée avec dxc en profil
+  6_0 seulement (l'appli compile en 5_0 avec FXC). Gain non mesuré : 128 → 32 lectures de texture par
+  vecteur candidat et 34 → 17 Dispatch de flow par frame unique sont des comptes faits en lisant le
+  code. Comparaison à faire : [docs/GUIDE-TEST-WINDOWS.md](docs/GUIDE-TEST-WINDOWS.md), étape 7.
+
 ## Pistes pour la suite
 
 - Modèle RIFE (ONNX Runtime + DirectML ou TensorRT) à la place de l'estimateur par blocs, avec la
   même mire pour mesurer le gain.
 - Récupérer les frames décodées directement dans chiaki (moins de latence que WGC).
+- Rendre et présenter avant le travail lourd d'une nouvelle frame unique (pour ne pas rater un vblank à
+  144/240 Hz) : pas fait sans mesure. Le travail lourd (upscale + flow) part souvent de `render()`
+  lui-même (`resolve_pending`), pas seulement de `submit()` ; inverser l'ordre dans la boucle ajouterait
+  une image de latence en passthrough, retarderait l'arrivée de B en FG (plus d'images tenues faute de B,
+  retard d'arrivée mesuré différemment). À reprendre avec des mesures PresentMon sur Windows (par exemple : soumettre au GPU la
+  composition avant le flow, dans `Pipeline`).
 
 ## Licence
 

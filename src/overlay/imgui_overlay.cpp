@@ -54,6 +54,7 @@ void ImguiOverlay::render(ID3D11RenderTargetView* rtv, OverlayModel& m, Pipeline
                                             : "Capture < 1080p : agrandis la fenêtre Remote Play (plein écran).");
         if (m.hdmi && m.audio) {
             ImGui::Text("Son : %s (%.0f ms en tampon)", m.audio->name().c_str(), m.audio->buffered_ms());
+            ImGui::Text("Retard du son : %.0f ms (%s)", m.audio->delay_ms(), m.audio_delay.c_str());
             if (ImGui::SliderFloat("Volume", &m.audio_volume, 0.0f, 1.0f, "%.2f")) m.audio->set_volume(m.audio_volume);
         } else if (m.hdmi) {
             ImGui::TextColored(warn, "Son non relayé : --audio-device \"nom\" (voir --list-devices).");

@@ -1,4 +1,5 @@
 #pragma once
+#include "capture/audio_delay.hpp"
 #include "capture/audio_passthrough.hpp"
 #include "capture/frame_source.hpp"
 #include "config.hpp"
@@ -34,6 +35,7 @@ private:
     Swapchain           sc_;
     ImguiOverlay        overlay_;
     AudioPassthrough    audio_;
+    audio_delay::Tracker audio_tracker_;  // lissage du retard du son (--audio-delay)
 
     HWND        hwnd_   = nullptr;
     HWND        target_ = nullptr;

@@ -11,6 +11,7 @@ struct OverlayModel {
     bool        hdmi         = false;
     class AudioPassthrough* audio = nullptr;
     float       audio_volume = 1.0f;
+    std::string audio_delay;  // réglage --audio-delay (auto, off, N ms)
 };
 
 class ImguiOverlay {

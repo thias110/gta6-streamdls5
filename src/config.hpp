@@ -1,5 +1,6 @@
 #pragma once
 #include "common.hpp"
+#include "capture/audio_delay.hpp"
 
 enum class UpscaleMode : int {
     Off     = 0,  // étirement bilinéaire
@@ -28,6 +29,7 @@ struct Config {
     bool  audio         = true;   // relais du son de la carte (mode HDMI)
     std::wstring audio_device;    // sous-chaîne du nom de l'entrée audio ; vide = auto
     float audio_volume  = 1.0f;
+    audio_delay::Setting audio_delay;  // retard du son relayé : auto (suit l'interpolation), ms fixes, off
     bool  windowed      = false;  // fenêtre classique au lieu de l'overlay plein écran
     bool  aspect_crop   = true;   // recadre la zone client en 16:9 (enlève les bandes noires)
     bool  test_pattern  = false;  // source synthétique 30 fps dans un flux 60 fps

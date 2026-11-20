@@ -308,6 +308,12 @@ int App::run() {
     model.hdmi         = cfg_.capture_source();
     model.audio        = audio_.running() ? &audio_ : nullptr;
     model.audio_volume = cfg_.audio_volume;
+    model.audio_delay  = audio_delay::describe(cfg_.audio_delay);
+    if (audio_.running())
+        log_msg("Son : retard %s (%s)", model.audio_delay.c_str(),
+                cfg_.audio_delay.mode == audio_delay::Mode::Auto
+                    ? "suit le retard ajouté par l'interpolation, 0 sans frame generation"
+                    : "fixe");
     log_msg("Démarré : %s, overlay %s, %.0f Hz", source_name_.c_str(), passive_ ? "oui" : "non", refresh_hz_);
 
     double last_log = now_seconds();
@@ -399,6 +405,15 @@ int App::run() {
         const double display   = fg ? sc_.next_vblank(now, 1.0 / std::max(1.0, refresh_hz_)) : now;
         const bool   generated = pipe_->render(sc_.rtv(), vp, now, display);
 
+        // Son de la carte : retardé d'autant que l'interpolation retarde l'image (--audio-delay auto), sinon il
+        // sortirait en avance ; lissé par audio_tracker_ (sauts >= 8 ms, au plus toutes les 0,5 s).
+        if (audio_.running()) {
+            const auto& pi     = pipe_->info();
+            const bool  fg_now = pipe_->settings.frame_gen && pi.interval_ms > 0.0f;
+            const float want   = audio_delay::target_ms(cfg_.audio_delay, fg_now, pi.delay_ms, pi.arrival_ms);
+            audio_.set_delay_ms(audio_tracker_.update(want, now));
+        }
+
         model.refresh_hz = refresh_hz_;
         overlay_.render(sc_.rtv(), model, *pipe_, stats_, prof_, now);
 
@@ -416,8 +431,10 @@ int App::run() {
                     info.capture.height, info.output.width, info.output.height,
                     Upscaler::path_name(info.upscale_path), info.delay_ms, prof_.ms(GpuSection::Flow));
             if (audio_.running())
-                log_msg("son : %.1f ms en tampon | %llu trames relayées, %llu jetées", audio_.buffered_ms(),
-                        static_cast<unsigned long long>(audio_.frames_relayed()),
+                log_msg("son : %.1f ms en tampon, retard %.0f ms (%s, en attente %.0f ms) | %llu trames relayées, "
+                        "%llu jetées",
+                        audio_.buffered_ms(), audio_.delay_ms(), audio_delay::describe(cfg_.audio_delay).c_str(),
+                        audio_.applied_delay_ms(), static_cast<unsigned long long>(audio_.frames_relayed()),
                         static_cast<unsigned long long>(audio_.frames_dropped()));
         }
     }

@@ -25,6 +25,9 @@ const wchar_t* usage_text() {
   --audio-device <txt>        entrée audio de la carte (défaut : auto)
   --audio-volume <0..1>       volume du son relayé (défaut : 1)
   --no-audio                  ne relaie pas le son de la carte
+  --audio-delay auto|<ms>|off retard du son relayé (défaut : auto = le retard que
+                              l'interpolation ajoute à l'image, pour que le son
+                              n'arrive pas en avance ; <ms> fixe de 0 à 250 ; off = 0)
 
   --windowed                  fenêtre classique au lieu de l'overlay plein écran
   --monitor <n>               moniteur de l'overlay (0, 1, ...)
@@ -113,6 +116,10 @@ Config parse_command_line() {
         else if (s == L"--no-audio") c.audio = false;
         else if (s == L"--audio-device") c.audio_device = value(i);
         else if (s == L"--audio-volume") c.audio_volume = number(i);
+        else if (s == L"--audio-delay") {
+            std::string err;
+            if (!audio_delay::parse(value(i), c.audio_delay, &err)) throw std::invalid_argument(err);
+        }
         else if (s == L"--window" || s == L"-w") c.window = value(i);
         else if (s == L"--windowed") c.windowed = true;
         else if (s == L"--monitor") c.monitor = int(number(i));

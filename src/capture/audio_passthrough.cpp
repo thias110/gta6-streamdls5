@@ -1,4 +1,5 @@
 #include "audio_passthrough.hpp"
+#include "audio_delay.hpp"
 
 #include <audioclient.h>
 #include <mmdeviceapi.h>
@@ -156,11 +157,14 @@ bool AudioPassthrough::start(const std::wstring& needle, const std::string& vide
 }
 
 void AudioPassthrough::loop() {
-    CoInitializeEx(nullptr, COINIT_MULTITHREADED);
-    auto&        m          = *impl_;
-    const UINT32 block      = m.fmt->nBlockAlign;
-    const UINT32 rate       = m.fmt->nSamplesPerSec;
-    const UINT32 max_queued = rate * 60 / 1000;  // au-delà de 60 ms en tampon, on jette
+    const HRESULT co          = CoInitializeEx(nullptr, COINIT_MULTITHREADED);
+    auto&         m           = *impl_;
+    const UINT32  rate        = m.fmt->nSamplesPerSec;
+    const UINT32  max_excess  = rate * 60 / 1000;  // plus de 60 ms au-delà du retard voulu en attente : on jette
+    const UINT32  max_padding = rate * 60 / 1000;  // sortie chargée de plus de 60 ms : on rattrape
+    // Retard logiciel : les trames capturées attendent ici le temps du retard voulu (set_delay_ms), puis partent
+    // vers la sortie. Retard 0 : tout part aussitôt, comme le relais d'origine.
+    audio_delay::FrameFifo fifo(m.fmt->nBlockAlign);
 
     while (running_) {
         if (WaitForSingleObject(m.event, 100) != WAIT_OBJECT_0) continue;
@@ -170,27 +174,32 @@ void AudioPassthrough::loop() {
             UINT32 frames = 0;
             DWORD  flags  = 0;
             if (FAILED(m.capture->GetBuffer(&data, &frames, &flags, nullptr, nullptr))) break;
-
-            UINT32 padding = 0;
-            m.out_client->GetCurrentPadding(&padding);
-            const UINT32 room  = m.out_frames - padding;
-            UINT32       write = std::min(frames, room);
-            if (padding > max_queued) write = 0;  // la sortie a pris du retard : on rattrape
-            if (write > 0) {
-                BYTE* dst = nullptr;
-                if (SUCCEEDED(m.render->GetBuffer(write, &dst))) {
-                    if (flags & AUDCLNT_BUFFERFLAGS_SILENT) std::memset(dst, 0, size_t(write) * block);
-                    else std::memcpy(dst, data, size_t(write) * block);
-                    m.render->ReleaseBuffer(write, 0);
-                }
-            }
-            frames_ += write;
-            dropped_ += frames - write;
-            buffered_ms_ = float(padding + write) * 1000.0f / float(rate);
+            fifo.push((flags & AUDCLNT_BUFFERFLAGS_SILENT) ? nullptr : data, frames);
             m.capture->ReleaseBuffer(frames);
         }
+
+        UINT32 padding = 0;
+        if (FAILED(m.out_client->GetCurrentPadding(&padding))) continue;
+        const UINT32 room   = m.out_frames > padding ? m.out_frames - padding : 0;
+        const UINT32 target = audio_delay::ms_to_frames(delay_ms_, rate);
+        const auto   p      = audio_delay::plan(fifo.frames(), target, room, padding, max_excess, max_padding);
+        if (p.drop) {
+            fifo.drop(p.drop);
+            dropped_ += p.drop;
+        }
+        UINT32 written = 0;
+        if (p.write) {
+            BYTE* dst = nullptr;
+            if (SUCCEEDED(m.render->GetBuffer(p.write, &dst))) {
+                written = fifo.pop(dst, p.write);
+                m.render->ReleaseBuffer(written, 0);
+            }
+        }
+        frames_ += written;
+        buffered_ms_      = float(padding + written) * 1000.0f / float(rate);
+        applied_delay_ms_ = float(fifo.frames()) * 1000.0f / float(rate);
     }
-    CoUninitialize();
+    if (SUCCEEDED(co)) CoUninitialize();
 }
 
 void AudioPassthrough::stop() {

@@ -1,5 +1,9 @@
 #include "swapchain.hpp"
 
+#include <dwmapi.h>
+
+#include <cmath>
+
 Swapchain::~Swapchain() {
     if (waitable_) CloseHandle(waitable_);
 }
@@ -47,6 +51,33 @@ void Swapchain::resize(Size2D size) {
     check_hr(swap_->ResizeBuffers(0, size.width, size.height, DXGI_FORMAT_UNKNOWN, flags_), "ResizeBuffers");
     size_ = size;
     create_rtv();
+}
+
+double Swapchain::next_vblank(double now, double fallback_period) const {
+    static const double inv_freq = [] {
+        LARGE_INTEGER f;
+        QueryPerformanceFrequency(&f);
+        return 1.0 / double(f.QuadPart);
+    }();
+    double period = 0.0, last = 0.0;
+
+    DWM_TIMING_INFO ti{};
+    ti.cbSize = sizeof(ti);
+    if (SUCCEEDED(DwmGetCompositionTimingInfo(nullptr, &ti)) && ti.qpcRefreshPeriod > 0) {
+        period = double(ti.qpcRefreshPeriod) * inv_freq;
+        last   = double(ti.qpcVBlank) * inv_freq;
+    }
+    // Phase du moniteur qui affiche réellement notre swapchain (DWM = moniteur principal).
+    DXGI_FRAME_STATISTICS fs{};
+    if (swap_ && SUCCEEDED(swap_->GetFrameStatistics(&fs)) && fs.SyncQPCTime.QuadPart > 0)
+        last = double(fs.SyncQPCTime.QuadPart) * inv_freq;
+    if (period <= 0.0) period = fallback_period;
+    if (period <= 0.0 || last <= 0.0 || now - last > 1.0) return now;  // pas d'info fiable
+
+    // Plus petit vblank >= now (last peut être légèrement dans le futur selon la source).
+    double next = last + std::ceil((now - last) / period) * period;
+    if (next - now < 1e-4) next += period;
+    return next;
 }
 
 void Swapchain::present(bool vsync, bool allow_tearing) {

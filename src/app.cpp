@@ -232,12 +232,54 @@ int App::run() {
             resize_pending_ = false;
         }
 
-        const bool fg = pipe_->settings.frame_gen;
-        if (fg) {
-            // Interpolation : on rend une image par rafraîchissement de l'écran.
-            WaitForSingleObjectEx(sc_.waitable(), 100, TRUE);
-        } else {
-            // Passthrough : on présente dès qu'une capture arrive (VRR), sinon ~30 Hz pour l'UI.
+        const bool fg  = pipe_->settings.frame_gen;
+        auto*      ctx = d3d_.ctx();
+        prof_.begin_frame(ctx);
+
+        auto poll_submit = [&] {
+            SourceFrame frame;
+            if (source_->poll(frame)) pipe_->submit(frame, now_seconds());
+        };
+
+        // 1. Jeton du swapchain (objet waitable), consommé dans les deux modes : sinon le sémaphore
+        //    s'accumule en passthrough et, au passage en FG, plusieurs images partent sans attendre le vblank.
+        //    En FG, les captures qui arrivent pendant l'attente sont soumises tout de suite (la frame B est
+        //    ainsi prête plus tôt, et son retard d'arrivée mesuré au plus juste).
+        {
+            HANDLE       wt       = sc_.waitable();
+            HANDLE       cap      = source_->wait_handle();
+            const double deadline = now_seconds() + 0.1;
+            for (;;) {
+                const double t = now_seconds();
+                if (t >= deadline) break;
+                double       wait_s    = deadline - t;
+                const double due       = source_->next_due();
+                const bool   timed_src = fg && !cap && due > 0.0;  // source cadencée sans event (mire)
+                if (timed_src) wait_s = std::min(wait_s, std::max(0.0, due - t));
+                HANDLE hs[2];
+                DWORD  n = 0;
+                if (wt) hs[n++] = wt;
+                const bool  watch_cap = fg && cap;
+                const DWORD cap_index = n;
+                if (watch_cap) hs[n++] = cap;
+                if (n == 0) break;
+                const DWORD r = WaitForMultipleObjectsEx(n, hs, FALSE, DWORD(std::ceil(wait_s * 1000.0)), TRUE);
+                if (wt && r == WAIT_OBJECT_0) break;  // jeton obtenu (prioritaire : index 0)
+                if (watch_cap && r == WAIT_OBJECT_0 + cap_index) {
+                    poll_submit();
+                    continue;
+                }
+                if (r == WAIT_IO_COMPLETION) continue;
+                if (r == WAIT_TIMEOUT && timed_src && now_seconds() >= due) {
+                    poll_submit();
+                    continue;
+                }
+                break;  // délai global écoulé ou erreur
+            }
+        }
+
+        // 2. Passthrough : on présente dès qu'une capture arrive (VRR), sinon ~30 Hz pour l'UI.
+        if (!fg) {
             HANDLE h       = source_->wait_handle();
             DWORD  timeout = 33;
             if (!h && source_->next_due() > 0.0)
@@ -245,11 +287,7 @@ int App::run() {
             MsgWaitForMultipleObjects(h ? 1 : 0, h ? &h : nullptr, FALSE, timeout, QS_ALLINPUT);
         }
 
-        auto* ctx = d3d_.ctx();
-        prof_.begin_frame(ctx);
-
-        SourceFrame frame;
-        if (source_->poll(frame)) pipe_->submit(frame);
+        poll_submit();
 
         const Size2D         client = sc_.size();
         const D3D11_VIEWPORT vp     = layout(client);
@@ -257,8 +295,11 @@ int App::run() {
 
         const float black[4] = {0.0f, 0.0f, 0.0f, 1.0f};
         ctx->ClearRenderTargetView(sc_.rtv(), black);
+        // FG : la cible d'interpolation est calée sur le vblank où l'image sera affichée, pas sur
+        // l'instant (bruité) où on la rend.
         const double now       = now_seconds();
-        const bool   generated = pipe_->render(sc_.rtv(), vp, now);
+        const double display   = fg ? sc_.next_vblank(now, 1.0 / std::max(1.0, refresh_hz_)) : now;
+        const bool   generated = pipe_->render(sc_.rtv(), vp, now, display);
 
         model.refresh_hz = refresh_hz_;
         overlay_.render(sc_.rtv(), model, *pipe_, stats_, prof_, now);

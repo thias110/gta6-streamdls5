@@ -9,6 +9,9 @@ public:
     void create(D3DContext& d3d, HWND hwnd, Size2D size);
     void resize(Size2D size);
     void present(bool vsync, bool allow_tearing);
+    // Instant (horloge now_seconds) du prochain vblank après `now`, d'après les statistiques DXGI
+    // (phase) et DWM (période) ; `fallback_period` si DWM ne répond pas. Renvoie `now` si inconnu.
+    double next_vblank(double now, double fallback_period) const;
 
     ID3D11RenderTargetView* rtv() const { return rtv_.Get(); }
     HANDLE                  waitable() const { return waitable_; }

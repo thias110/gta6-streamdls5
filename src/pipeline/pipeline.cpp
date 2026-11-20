@@ -15,8 +15,11 @@ void Pipeline::reset_history() {
     for (auto& f : ring_) {
         f.valid    = false;
         f.has_flow = false;
+        f.has_raw  = false;
     }
     interval_ = jitter_ = 0.0;
+    lag_ = lag_jitter_ = 0.0;
+    lead_ = -1.0;
 }
 
 void Pipeline::set_output_size(Size2D s) {
@@ -42,7 +45,7 @@ Pipeline::UniqueFrame& Pipeline::acquire_slot() {
     return *oldest;
 }
 
-bool Pipeline::submit(const SourceFrame& f) {
+bool Pipeline::submit(const SourceFrame& f, double arrival) {
     if (!f.texture || output_.empty()) return false;
     auto* ctx = d3d_.ctx();
     auto* dev = d3d_.device();
@@ -59,10 +62,16 @@ bool Pipeline::submit(const SourceFrame& f) {
     motion_.build_pyramid(scratch_, src.srv.Get(), cs);
     UniqueFrame* last = newest();
     bool  unique = true;
+    bool  cut    = false;
     float metric = -1.0f;
-    if (last && settings.dedupe) {
-        metric = motion_.measure_difference(scratch_, last->pyr).max_tile;
-        unique = metric > settings.dup_threshold;
+    if (last && (settings.dedupe || settings.frame_gen)) {
+        const DiffResult d = motion_.measure_difference(scratch_, last->pyr);
+        if (settings.dedupe) {
+            metric = d.max_tile;
+            unique = metric > settings.dup_threshold;
+        }
+        // Changement de plan : le flow n'a pas de sens, on évitera d'interpoler à travers.
+        cut = d.mean > settings.cut_threshold;
     }
     prof_.end(ctx, GpuSection::Analyze);
     if (last && f.time <= last->time) unique = false;  // horodatage non monotone
@@ -70,11 +79,22 @@ bool Pipeline::submit(const SourceFrame& f) {
     stats_.on_capture(f.time, unique, metric);
     if (!unique) return false;
 
+    // Retard d'arrivée (horodatage de capture -> soumission) : il s'ajoute au retard d'interpolation.
+    const double lag = arrival - f.time;
+    if (lag >= 0.0 && lag < 0.25) {
+        if (lag_ == 0.0) lag_ = lag;
+        lag_jitter_ = lag_jitter_ * 0.9 + std::abs(lag - lag_) * 0.1;
+        lag_        = lag_ * 0.9 + lag * 0.1;
+    }
+
     // 2. Nouvelle frame unique : on l'ajoute à l'historique.
     UniqueFrame& slot = acquire_slot();
     std::swap(slot.pyr, scratch_);
-    slot.raw.ensure(dev, cs.width, cs.height, DXGI_FORMAT_B8G8R8A8_UNORM, D3D11_BIND_SHADER_RESOURCE, "raw");
-    ctx->CopyResource(slot.raw.tex.Get(), src.tex.Get());
+    slot.has_raw = settings.compare;  // la copie brute ne sert qu'au mode comparaison
+    if (slot.has_raw) {
+        slot.raw.ensure(dev, cs.width, cs.height, DXGI_FORMAT_B8G8R8A8_UNORM, D3D11_BIND_SHADER_RESOURCE, "raw");
+        ctx->CopyResource(slot.raw.tex.Get(), src.tex.Get());
+    }
 
     prof_.begin(ctx, GpuSection::Upscale);
     const GpuTexture& up = upscaler_.run(src, output_, settings.upscale, settings.sharpness);
@@ -99,11 +119,14 @@ bool Pipeline::submit(const SourceFrame& f) {
             jitter_   = jitter_ * 0.9 + std::abs(dt - interval_) * 0.1;
             interval_ = interval_ * 0.9 + dt * 0.1;
         }
-        if (settings.frame_gen || settings.flow_viz) {
+        if (cut) ++info_.scene_cuts;
+        if (!cut && (settings.frame_gen || settings.flow_viz)) {
             prof_.begin(ctx, GpuSection::Flow);
-            ID3D11ShaderResourceView* temporal = last->has_flow ? last->flow_fwd.srv.Get() : nullptr;
-            motion_.estimate_flow(last->pyr, slot.pyr, temporal, 1.0f, slot.flow_fwd);
-            motion_.estimate_flow(slot.pyr, last->pyr, temporal, -1.0f, slot.flow_bwd);
+            // Prédicteurs temporels : flow de même sens de la paire précédente (mouvement ~constant).
+            ID3D11ShaderResourceView* t_fwd = last->has_flow ? last->flow_fwd.srv.Get() : nullptr;
+            ID3D11ShaderResourceView* t_bwd = last->has_flow ? last->flow_bwd.srv.Get() : nullptr;
+            motion_.estimate_flow(last->pyr, slot.pyr, t_fwd, 1.0f, slot.flow_fwd);
+            motion_.estimate_flow(slot.pyr, last->pyr, t_bwd, 1.0f, slot.flow_bwd);
             prof_.end(ctx, GpuSection::Flow);
             slot.has_flow = true;
             slot.prev_id  = last->id;
@@ -111,12 +134,22 @@ bool Pipeline::submit(const SourceFrame& f) {
     }
     info_.interval_ms = float(interval_ * 1000.0);
     info_.jitter_ms   = float(jitter_ * 1000.0);
-    info_.delay_ms    = float((interval_ * settings.delay_scale + 2.0 * jitter_) * 1000.0);
+    info_.arrival_ms  = float(lag_ * 1000.0);
     return true;
 }
 
-bool Pipeline::render(ID3D11RenderTargetView* rtv, const D3D11_VIEWPORT& vp, double now) {
-    std::array<const UniqueFrame*, 4> fr{};
+bool Pipeline::render(ID3D11RenderTargetView* rtv, const D3D11_VIEWPORT& vp, double now, double display_time) {
+    // Avance de l'affichage sur le rendu, lissée : la cible reste calée sur les vblanks.
+    const double lead = std::clamp(display_time - now, 0.0, 0.1);
+    lead_ = lead_ < 0.0 ? lead : lead_ * 0.95 + lead * 0.05;
+
+    // Retard = intervalle (avec marge) + retard d'arrivée + gigues + avance d'affichage, borné par ce que
+    // l'historique couvre : au-delà, la paire encadrante serait déjà sortie de l'anneau.
+    double delay = interval_ * settings.delay_scale + lag_ + 2.0 * (jitter_ + lag_jitter_) + lead_;
+    if (interval_ > 0.0) delay = std::min(delay, double(kRing - 2) * interval_);
+    info_.delay_ms = float(delay * 1000.0);
+
+    std::array<const UniqueFrame*, kRing> fr{};
     size_t n = 0;
     for (const auto& u : ring_)
         if (u.valid) fr[n++] = &u;
@@ -137,7 +170,7 @@ bool Pipeline::render(ID3D11RenderTargetView* rtv, const D3D11_VIEWPORT& vp, dou
         comp_.blit(latest->up.srv.Get());
     } else {
         // On affiche le passé (maintenant - retard) pour toujours avoir la frame suivante B en main.
-        const double target = now - double(info_.delay_ms) * 1e-3;
+        const double target = display_time - delay;
         const UniqueFrame *a = nullptr, *b = nullptr;
         for (size_t i = 0; i + 1 < n; ++i) {
             if (fr[i]->time <= target && target < fr[i + 1]->time) {
@@ -164,7 +197,7 @@ bool Pipeline::render(ID3D11RenderTargetView* rtv, const D3D11_VIEWPORT& vp, dou
         }
     }
 
-    if (settings.compare) {  // avant (capture brute étirée) | après
+    if (settings.compare && ref->has_raw) {  // avant (capture brute étirée) | après
         const LONG mid = LONG(vp.TopLeftX + vp.Width * 0.5f);
         const D3D11_RECT left{LONG(vp.TopLeftX), LONG(vp.TopLeftY), mid, LONG(vp.TopLeftY + vp.Height)};
         comp_.scissor(&left);

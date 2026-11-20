@@ -58,6 +58,8 @@ void ImguiOverlay::render(ID3D11RenderTargetView* rtv, const OverlayModel& m, Pi
         ImGui::Text("intervalle %5.1f ms   gigue %4.1f ms", info.interval_ms, info.jitter_ms);
         if (set.frame_gen)
             ImGui::Text("retard FG  %5.1f ms   (latence ajoutée par l'interpolation)", info.delay_ms);
+        ImGui::Text("arrivée    %5.1f ms   changements de plan %llu", info.arrival_ms,
+                    static_cast<unsigned long long>(info.scene_cuts));
 
         char label[64];
         std::snprintf(label, sizeof(label), "diff  %.2f / seuil %.2f", info.last_metric, set.dup_threshold);

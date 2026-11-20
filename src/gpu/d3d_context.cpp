@@ -46,15 +46,46 @@ ComPtr<ID3DBlob> compile_hlsl(std::string_view body, const char* entry, const ch
 }
 }  // namespace
 
-void D3DContext::initialize(bool debug_layer) {
+namespace {
+// Échoue tout de suite, avec un message clair, s'il manque au device une fonctionnalité dont le pipeline a
+// besoin (utile surtout en --warp : rasteriseur logiciel de la CI, sans GPU).
+void require_features(ID3D11Device* dev, const std::string& adapter) {
+    auto fail = [&](const std::string& what) {
+        const std::string msg = "fonctionnalité D3D11 manquante sur " + adapter + " : " + what;
+        log_msg("%s", msg.c_str());
+        throw std::runtime_error(msg);
+    };
+    if (dev->GetFeatureLevel() < D3D_FEATURE_LEVEL_11_0) fail("feature level 11_0 (compute shaders cs_5_0)");
+
+    struct Need {
+        DXGI_FORMAT f;
+        UINT        flags;
+        const char* name;
+    };
+    // Écritures UAV typées seulement (aucune lecture de UAV typé dans les shaders).
+    const Need needs[] = {
+        {DXGI_FORMAT_B8G8R8A8_UNORM, D3D11_FORMAT_SUPPORT_RENDER_TARGET | D3D11_FORMAT_SUPPORT_SHADER_SAMPLE,
+         "B8G8R8A8_UNORM (cible de rendu, échantillonnage)"},
+        {DXGI_FORMAT_R16_FLOAT, D3D11_FORMAT_SUPPORT_TYPED_UNORDERED_ACCESS_VIEW | D3D11_FORMAT_SUPPORT_SHADER_LOAD,
+         "R16_FLOAT (UAV typé : pyramide de luminance, bords)"},
+        {DXGI_FORMAT_R32G32_FLOAT, D3D11_FORMAT_SUPPORT_TYPED_UNORDERED_ACCESS_VIEW | D3D11_FORMAT_SUPPORT_SHADER_LOAD,
+         "R32G32_FLOAT (UAV typé : flow)"},
+    };
+    for (const Need& n : needs) {
+        UINT got = 0;
+        if (FAILED(dev->CheckFormatSupport(n.f, &got)) || (got & n.flags) != n.flags) fail(n.name);
+    }
+}
+}  // namespace
+
+void D3DContext::initialize(bool debug_layer, bool warp) {
+    warp_ = warp;
     ComPtr<IDXGIFactory6> f6;
-    check_hr(CreateDXGIFactory2(0, IID_PPV_ARGS(&f6)), "CreateDXGIFactory2");
-    check_hr(f6->EnumAdapterByGpuPreference(0, DXGI_GPU_PREFERENCE_HIGH_PERFORMANCE, IID_PPV_ARGS(&adapter_)),
-             "EnumAdapterByGpuPreference");
-    DXGI_ADAPTER_DESC1 ad{};
-    adapter_->GetDesc1(&ad);
-    adapter_name_ = narrow(ad.Description);
-    vendor_id_    = ad.VendorId;
+    if (!warp) {
+        check_hr(CreateDXGIFactory2(0, IID_PPV_ARGS(&f6)), "CreateDXGIFactory2");
+        check_hr(f6->EnumAdapterByGpuPreference(0, DXGI_GPU_PREFERENCE_HIGH_PERFORMANCE, IID_PPV_ARGS(&adapter_)),
+                 "EnumAdapterByGpuPreference");
+    }
 
     const D3D_FEATURE_LEVEL levels[] = {D3D_FEATURE_LEVEL_11_1, D3D_FEATURE_LEVEL_11_0};
     const UINT base = D3D11_CREATE_DEVICE_BGRA_SUPPORT | D3D11_CREATE_DEVICE_VIDEO_SUPPORT;
@@ -63,14 +94,33 @@ void D3DContext::initialize(bool debug_layer) {
     auto create = [&](UINT flags) {
         dev.Reset();
         ctx.Reset();
-        return D3D11CreateDevice(adapter_.Get(), D3D_DRIVER_TYPE_UNKNOWN, nullptr, flags, levels,
-                                 UINT(std::size(levels)), D3D11_SDK_VERSION, &dev, nullptr, &ctx);
+        // WARP : pas d'adaptateur explicite, D3D choisit le rasteriseur logiciel.
+        return D3D11CreateDevice(warp ? nullptr : adapter_.Get(), warp ? D3D_DRIVER_TYPE_WARP : D3D_DRIVER_TYPE_UNKNOWN,
+                                 nullptr, flags, levels, UINT(std::size(levels)), D3D11_SDK_VERSION, &dev, nullptr,
+                                 &ctx);
     };
     HRESULT hr = E_FAIL;
     if (debug_layer) hr = create(base | D3D11_CREATE_DEVICE_DEBUG);  // échoue si les Graphics Tools manquent
     if (FAILED(hr)) hr = create(base);
     if (FAILED(hr)) hr = create(D3D11_CREATE_DEVICE_BGRA_SUPPORT);
-    check_hr(hr, "D3D11CreateDevice");
+    check_hr(hr, warp ? "D3D11CreateDevice (WARP)" : "D3D11CreateDevice");
+
+    if (warp) {  // adaptateur et fabrique DXGI du device WARP (la swapchain doit venir de la même fabrique)
+        ComPtr<IDXGIDevice>  dxgi_dev;
+        ComPtr<IDXGIAdapter> a;
+        check_hr(dev.As(&dxgi_dev), "IDXGIDevice (WARP)");
+        check_hr(dxgi_dev->GetAdapter(&a), "IDXGIDevice::GetAdapter (WARP)");
+        check_hr(a.As(&adapter_), "IDXGIAdapter1 (WARP)");
+        check_hr(adapter_->GetParent(IID_PPV_ARGS(&f6)), "IDXGIFactory6 (WARP)");
+    }
+    DXGI_ADAPTER_DESC1 ad{};
+    adapter_->GetDesc1(&ad);
+    adapter_name_ = narrow(ad.Description);
+    vendor_id_    = ad.VendorId;
+    const unsigned fl = unsigned(dev->GetFeatureLevel());
+    log_msg("Device D3D11 : %s, feature level %u_%u%s", adapter_name_.c_str(), (fl >> 12) & 0xFu, (fl >> 8) & 0xFu,
+            warp ? ", WARP (rendu logiciel)" : "");
+    require_features(dev.Get(), adapter_name_);
 
     device_ = dev;
     check_hr(ctx.As(&ctx_), "ID3D11DeviceContext1");

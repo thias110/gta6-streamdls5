@@ -193,7 +193,7 @@ LRESULT App::on_message(HWND h, UINT m, WPARAM w, LPARAM l) {
 }
 
 int App::run() {
-    d3d_.initialize(cfg_.debug_layer);
+    d3d_.initialize(cfg_.debug_layer, cfg_.warp);
     prof_.init(d3d_.device());
     pipe_ = std::make_unique<Pipeline>(d3d_, prof_, stats_);
     pipe_->init();

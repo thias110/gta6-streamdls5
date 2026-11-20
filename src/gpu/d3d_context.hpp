@@ -22,7 +22,8 @@ struct GpuTexture {
 
 class D3DContext {
 public:
-    void initialize(bool debug_layer);
+    // warp : rasteriseur logiciel Microsoft (D3D_DRIVER_TYPE_WARP) au lieu du GPU matériel.
+    void initialize(bool debug_layer, bool warp = false);
 
     ID3D11Device*         device() const { return device_.Get(); }
     ID3D11DeviceContext1* ctx() const { return ctx_.Get(); }
@@ -32,6 +33,7 @@ public:
 
     bool               tearing_supported() const { return tearing_; }
     bool               is_nvidia() const { return vendor_id_ == 0x10DE; }
+    bool               is_warp() const { return warp_; }
     const std::string& adapter_name() const { return adapter_name_; }
 
     // Compile `body` précédé du bloc HLSL commun (shaders::kCommon).
@@ -65,6 +67,7 @@ private:
     ComPtr<ID3D11SamplerState>   linear_, point_;
     ComPtr<ID3D11Buffer>         cb_;
     bool        tearing_   = false;
+    bool        warp_      = false;
     uint32_t    vendor_id_ = 0;
     std::string adapter_name_;
 };

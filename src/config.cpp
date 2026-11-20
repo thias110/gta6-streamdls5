@@ -40,6 +40,9 @@ const wchar_t* usage_text() {
   --test-pattern              source synthétique (pas besoin de PS5)
   --selftest                  mesure qualité/perf de l'interpolation puis quitte
   --debug                     active la couche de debug D3D11
+  --warp                      rendu logiciel D3D11 WARP au lieu du GPU (CI sans
+                              GPU, très lent ; échoue tout de suite s'il manque
+                              une fonctionnalité D3D11 nécessaire)
 
 Raccourcis globaux : Ctrl+Alt+S stats, U upscale, F frame gen,
                      C comparaison, V flow, Q quitter)";
@@ -79,6 +82,7 @@ Config parse_command_line() {
         else if (s == L"--test-pattern") c.test_pattern = true;
         else if (s == L"--selftest") c.selftest = true;
         else if (s == L"--debug") c.debug_layer = true;
+        else if (s == L"--warp") c.warp = true;
         else if (s == L"--no-fg") c.frame_gen = false;
         else if (s == L"--fg") c.frame_gen = true;
         else if (s == L"--sharpness") c.sharpness = number(i);

@@ -81,7 +81,7 @@ void write_bmp(const std::wstring& path, const Image& img) {
 int run_selftest(const Config& cfg) {
     log_msg("== rpenhance selftest ==");
     D3DContext d3d;
-    d3d.initialize(cfg.debug_layer);
+    d3d.initialize(cfg.debug_layer, cfg.warp);
     auto* dev = d3d.device();
     auto* ctx = d3d.ctx();
 

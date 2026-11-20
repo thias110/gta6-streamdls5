@@ -22,6 +22,7 @@ struct Config {
     bool  selftest      = false;  // test qualité/perf sans fenêtre, puis quitte
     bool  allow_tearing = true;   // VRR/tearing quand la frame generation est coupée
     bool  debug_layer   = false;
+    bool  warp          = false;  // rasteriseur logiciel WARP (CI sans GPU) au lieu du GPU matériel
     bool  show_stats    = true;
     bool  help          = false;
     int   monitor       = -1;     // -1 = moniteur de la fenêtre capturée

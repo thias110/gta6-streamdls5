@@ -1,0 +1,95 @@
+# Compilation réelle sous Windows (MSVC), tests CPU (ctest) et selftest en D3D11 WARP (rendu logiciel,
+# le runner n'a pas de GPU). Aucun secret, aucun SDK NVIDIA : build par défaut (RPENHANCE_NVVFX=OFF).
+name: windows-build
+
+on:
+  push:
+    branches: ['**']
+  pull_request:
+
+permissions:
+  contents: read
+
+concurrency:
+  group: windows-build-${{ github.ref }}
+  cancel-in-progress: true
+
+jobs:
+  build:
+    runs-on: windows-latest
+    timeout-minutes: 45
+    defaults:
+      run:
+        shell: pwsh
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+        with:
+          persist-credentials: false
+
+      - name: Configuration CMake (x64, RPENHANCE_NVVFX=OFF)
+        run: cmake -S . -B build -A x64 -DRPENHANCE_NVVFX=OFF
+
+      - name: Compilation Release
+        run: cmake --build build --config Release --parallel
+
+      - name: Tests CPU (ctest dedupe, scene_cut)
+        working-directory: build
+        run: ctest -C Release --output-on-failure
+
+      # WARP peut ne pas tout supporter : l'étape ne bloque pas le job pour l'instant, mais ses journaux et
+      # images sont publiés en artefact. rpenhance est une appli WIN32 (pas de console) : on attend le
+      # processus et on relaie son code de sortie.
+      - name: Selftest D3D11 WARP
+        id: selftest
+        continue-on-error: true
+        timeout-minutes: 20
+        run: |
+          $exe = Join-Path $PWD 'build\Release\rpenhance.exe'
+          $p = Start-Process -FilePath $exe -ArgumentList '--selftest', '--warp' -PassThru
+          $null = $p.Handle  # garde le handle pour lire ExitCode après WaitForExit
+          if (-not $p.WaitForExit(15 * 60 * 1000)) {
+            $p.Kill()
+            Write-Error 'selftest WARP : délai de 15 min dépassé'
+            exit 124
+          }
+          $log = 'build\Release\rpenhance.log'
+          if (Test-Path $log) { Get-Content -Encoding UTF8 $log }
+          Write-Host "code de sortie : $($p.ExitCode)"
+          exit $p.ExitCode
+
+      - name: Résumé du selftest
+        if: always()
+        run: |
+          $log = 'build\Release\rpenhance.log'
+          $out = @('## Selftest D3D11 WARP', '')
+          $out += "Résultat de l'étape : **${{ steps.selftest.outcome }}** (non bloquant pour l'instant)"
+          $out += ''
+          if (Test-Path $log) {
+            $lines = Get-Content -Encoding UTF8 $log |
+              Where-Object { $_ -match 'PSNR|dB|SELFTEST|Device D3D11|GPU :|Upscale|fonctionnalité|Erreur|HRESULT' }
+            if ($lines) {
+              $out += '```'
+              $out += $lines
+              $out += '```'
+            } else {
+              $out += "_Aucune ligne de mesure dans rpenhance.log._"
+            }
+          } else {
+            $out += '_rpenhance.log absent (le selftest ne s''est pas lancé ?)._'
+          }
+          $out += ''
+          $out += 'WARP = rasteriseur logiciel : les PSNR valent pour la qualité, les temps GPU ne veulent rien dire.'
+          $out | Out-File -FilePath $env:GITHUB_STEP_SUMMARY -Encoding utf8 -Append
+
+      - name: Artefacts du selftest (journal, images)
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: selftest-warp
+          path: |
+            build/Release/rpenhance.log
+            build/Release/selftest/
+            build/Testing/Temporary/LastTest.log
+          if-no-files-found: warn
+          retention-days: 7

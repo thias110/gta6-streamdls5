@@ -1,5 +1,7 @@
 # rpenhance
 
+[![windows-build](https://github.com/thias110/gta6-streamdls5/actions/workflows/windows-build.yml/badge.svg)](https://github.com/thias110/gta6-streamdls5/actions/workflows/windows-build.yml)
+
 Upscale + interpolation d'images en temps réel sur le flux **PS Remote Play / chiaki** affiché sur PC.
 Même idée que Veyra, mais sans installeur opaque : tout le pipeline est ici, en C++/D3D11, lisible.
 
@@ -92,6 +94,13 @@ Windows SDK, CMake inclus). ImGui est téléchargé automatiquement.
 ```
 
 L'exécutable est dans `build\Release\rpenhance.exe`.
+
+Intégration continue : [`.github/workflows/windows-build.yml`](.github/workflows/windows-build.yml)
+compile avec MSVC sur `windows-latest` (sans SDK NVIDIA), lance `ctest` puis
+`rpenhance.exe --selftest --warp` : le selftest tourne sur WARP, le rendu logiciel D3D11, car le
+runner n'a pas de GPU. Cette étape ne bloque pas encore le job ; `rpenhance.log` et les images
+sont dans l'artefact `selftest-warp`, les PSNR dans le résumé du run. Sur WARP, les temps GPU ne
+veulent rien dire.
 
 ## Utiliser
 

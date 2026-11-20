@@ -297,6 +297,7 @@ modes, l'interpolation ajoute environ un intervalle entre images uniques ; `--no
 | `--source capture` / `--hdmi` | carte de capture au lieu de la fenêtre Remote Play |
 | `--device "nom"` | sous-chaîne du nom de la carte (implique `--source capture`) |
 | `--mode WxH[@fps]` | mode natif à utiliser (implique `--source capture`) |
+| `--capture-sync` | lecture synchrone de la carte sur un thread dédié (ancien mode ; repli si la lecture asynchrone par défaut pose problème) |
 | `--list-devices` | cartes vidéo, entrées audio, et modes de la carte retenue avec `--source capture`/`--device` |
 | `--audio-device "nom"` | entrée audio de la carte (défaut : déduite du nom de la carte vidéo) |
 | `--audio-volume 0.8` | volume du son relayé (aussi dans l'overlay) |

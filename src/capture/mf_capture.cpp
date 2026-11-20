@@ -6,6 +6,7 @@
 #include <mfidl.h>
 #include <mfreadwrite.h>
 
+#include <atomic>
 #include <cmath>
 #include <cwchar>
 #include <mutex>
@@ -91,6 +92,75 @@ std::vector<cl::NativeMode> native_modes(IMFSourceReader* reader, std::vector<Co
     return modes;
 }
 
+// Lecture asynchrone (MF_SOURCE_READER_ASYNC_CALLBACK) : ReadSample ne bloque jamais ; chaque échantillon
+// arrive sur un thread de travail MF et la demande suivante part de là. Le propriétaire est détaché sous
+// verrou à l'arrêt : après detach(), aucun rappel ne touche plus à la source (même s'il arrive en retard).
+class ReaderCallback final : public IMFSourceReaderCallback {
+public:
+    // Renvoie true pour demander l'échantillon suivant.
+    using Sink = bool (*)(void* owner, HRESULT hr, DWORD flags, LONGLONG ts, IMFSample* sample);
+
+    ReaderCallback(void* owner, Sink sink) : owner_(owner), sink_(sink) {
+        flushed_ = CreateEventW(nullptr, TRUE, FALSE, nullptr);
+    }
+    ReaderCallback(const ReaderCallback&)            = delete;
+    ReaderCallback& operator=(const ReaderCallback&) = delete;
+
+    void set_reader(IMFSourceReader* r) {
+        std::lock_guard lk(mu_);
+        reader_ = r;  // pas de référence : le reader possède le rappel (pas de cycle) ; effacé par detach()
+    }
+    void detach() {
+        std::lock_guard lk(mu_);  // attend la fin d'un rappel en cours (court : aucun appel bloquant dedans)
+        owner_  = nullptr;
+        reader_ = nullptr;
+    }
+    HANDLE flushed() const { return flushed_; }
+
+    STDMETHODIMP QueryInterface(REFIID iid, void** out) override {
+        if (!out) return E_POINTER;
+        if (iid == __uuidof(IUnknown) || iid == __uuidof(IMFSourceReaderCallback)) {
+            *out = static_cast<IMFSourceReaderCallback*>(this);
+            AddRef();
+            return S_OK;
+        }
+        *out = nullptr;
+        return E_NOINTERFACE;
+    }
+    STDMETHODIMP_(ULONG) AddRef() override { return ULONG(++refs_); }
+    STDMETHODIMP_(ULONG) Release() override {
+        const long n = --refs_;
+        if (n == 0) delete this;
+        return ULONG(n);
+    }
+    STDMETHODIMP OnReadSample(HRESULT hr, DWORD /*stream*/, DWORD flags, LONGLONG ts, IMFSample* sample) override {
+        std::lock_guard lk(mu_);  // récursif : un ReadSample qui rappellerait sur le même thread ne bloque pas
+        if (!owner_ || !reader_) return S_OK;
+        if (sink_(owner_, hr, flags, ts, sample)) {
+            const HRESULT next = reader_->ReadSample(DWORD(MF_SOURCE_READER_FIRST_VIDEO_STREAM), 0, nullptr, nullptr,
+                                                     nullptr, nullptr);
+            if (FAILED(next)) sink_(owner_, next, MF_SOURCE_READERF_ERROR, 0, nullptr);
+        }
+        return S_OK;
+    }
+    STDMETHODIMP OnFlush(DWORD) override {
+        SetEvent(flushed_);
+        return S_OK;
+    }
+    STDMETHODIMP OnEvent(DWORD, IMFMediaEvent*) override { return S_OK; }
+
+private:
+    ~ReaderCallback() {
+        if (flushed_) CloseHandle(flushed_);
+    }
+    std::atomic<long>    refs_{1};
+    std::recursive_mutex mu_;
+    void*                owner_  = nullptr;
+    Sink                 sink_   = nullptr;
+    IMFSourceReader*     reader_ = nullptr;
+    HANDLE               flushed_ = nullptr;
+};
+
 }  // namespace
 
 std::vector<std::wstring> list_capture_devices() {
@@ -130,7 +200,10 @@ struct MfCaptureSource::Impl {
     ComPtr<IMFSourceReader>     reader;
     cl::Output                  output = cl::Output::NV12;  // format demandé au Source Reader (fixé au démarrage)
 
-    std::thread       thread;
+    std::thread       thread;            // lecture synchrone (--capture-sync) uniquement
+    ComPtr<ReaderCallback> callback;     // lecture asynchrone (défaut)
+    bool              sync_read = false;
+    bool              discontinuity = true;  // prochain échantillon : recalage de l'horodatage
     std::atomic<bool> running{false};
     std::atomic<bool> failed{false};
     std::atomic<int>  basis{int(cl::TimestampMapper::Basis::None)};
@@ -168,6 +241,8 @@ struct MfCaptureSource::Impl {
 
     void read_format();
     void loop();
+    // Traite le résultat d'une lecture (synchrone ou asynchrone) ; false = arrêter de lire.
+    bool on_sample(HRESULT hr, DWORD flags, LONGLONG ts, IMFSample* sample);
     bool ensure_processor(UINT32 w, UINT32 h, bool full, bool b601);
     ID3D11VideoProcessorInputView* input_view(ID3D11Texture2D* tex, UINT slice);
     bool upload_system_memory(IMFMediaBuffer* buf, UINT32 w, UINT32 h, LONG default_stride);
@@ -191,59 +266,69 @@ void MfCaptureSource::Impl::read_format() {
     stride     = st;
 }
 
+bool MfCaptureSource::Impl::on_sample(HRESULT hr, DWORD flags, LONGLONG ts, IMFSample* sample_in) {
+    if (!running) return false;
+    if (FAILED(hr)) {
+        log_msg("Carte de capture : ReadSample en échec (0x%08lX)", static_cast<unsigned long>(hr));
+        failed = true;
+        SetEvent(event);  // réveille le thread de rendu : alive() est devenu faux
+        return false;
+    }
+    if (flags & (MF_SOURCE_READERF_ENDOFSTREAM | MF_SOURCE_READERF_ERROR)) {
+        log_msg("Carte de capture : fin du flux (débranchée ?)");
+        failed = true;
+        SetEvent(event);
+        return false;
+    }
+    if (flags & MF_SOURCE_READERF_CURRENTMEDIATYPECHANGED) {
+        try {
+            read_format();
+        } catch (const std::exception& e) {
+            log_msg("Carte de capture : nouveau format illisible (%s)", e.what());
+            failed = true;
+            SetEvent(event);
+            return false;
+        }
+        UINT32 w = 0, h = 0;
+        {
+            std::lock_guard lk(mu);
+            w = width;
+            h = height;
+        }
+        log_msg("Carte de capture : nouveau format %ux%u", w, h);
+        discontinuity = true;
+    }
+    if (flags & MF_SOURCE_READERF_STREAMTICK) discontinuity = true;  // trou dans le flux
+    if (!sample_in) return true;
+    ComPtr<IMFSample> sample(sample_in);
+
+    const double           arrival = now_seconds();
+    std::optional<int64_t> device_time;
+    UINT64                 dt = 0;
+    if (SUCCEEDED(sample->GetUINT64(kDeviceReferenceSystemTime, &dt)) && dt) device_time = int64_t(dt);
+    if (MFGetAttributeUINT32(sample.Get(), MFSampleExtension_Discontinuity, FALSE)) discontinuity = true;
+    const double t = mapper.map(device_time, int64_t(ts), discontinuity, arrival);
+    discontinuity  = false;
+    basis          = int(mapper.basis());
+    {
+        std::lock_guard lk(mu);
+        latest      = sample;  // la précédente, jamais lue, est abandonnée : seule la plus récente compte
+        latest_time = t;
+    }
+    SetEvent(event);
+    return true;
+}
+
 void MfCaptureSource::Impl::loop() {
     const HRESULT co = CoInitializeEx(nullptr, COINIT_MULTITHREADED);
-    bool discontinuity = true;  // première image : recalage de l'horodatage
     while (running) {
         DWORD             stream = 0, flags = 0;
         LONGLONG          ts = 0;
         ComPtr<IMFSample> sample;
-        // Bloquant (mode synchrone), mais sur ce thread dédié : ni le thread GPU ni l'UI n'attendent la carte.
-        HRESULT hr = reader->ReadSample(DWORD(MF_SOURCE_READER_FIRST_VIDEO_STREAM), 0, &stream, &flags, &ts, &sample);
-        if (FAILED(hr)) {
-            if (running) log_msg("Carte de capture : ReadSample en échec (0x%08lX)", static_cast<unsigned long>(hr));
-            failed = true;
-            break;
-        }
-        if (flags & (MF_SOURCE_READERF_ENDOFSTREAM | MF_SOURCE_READERF_ERROR)) {
-            log_msg("Carte de capture : fin du flux (débranchée ?)");
-            failed = true;
-            break;
-        }
-        if (flags & MF_SOURCE_READERF_CURRENTMEDIATYPECHANGED) {
-            try {
-                read_format();
-            } catch (const std::exception& e) {
-                log_msg("Carte de capture : nouveau format illisible (%s)", e.what());
-                failed = true;
-                break;
-            }
-            UINT32 w = 0, h = 0;
-            {
-                std::lock_guard lk(mu);
-                w = width;
-                h = height;
-            }
-            log_msg("Carte de capture : nouveau format %ux%u", w, h);
-            discontinuity = true;
-        }
-        if (flags & MF_SOURCE_READERF_STREAMTICK) discontinuity = true;  // trou dans le flux
-        if (!sample) continue;
-
-        const double           arrival = now_seconds();
-        std::optional<int64_t> device_time;
-        UINT64                 dt = 0;
-        if (SUCCEEDED(sample->GetUINT64(kDeviceReferenceSystemTime, &dt)) && dt) device_time = int64_t(dt);
-        if (MFGetAttributeUINT32(sample.Get(), MFSampleExtension_Discontinuity, FALSE)) discontinuity = true;
-        const double t = mapper.map(device_time, int64_t(ts), discontinuity, arrival);
-        discontinuity  = false;
-        basis          = int(mapper.basis());
-        {
-            std::lock_guard lk(mu);
-            latest      = sample;  // la précédente, jamais lue, est abandonnée : seule la plus récente compte
-            latest_time = t;
-        }
-        SetEvent(event);
+        // Bloquant (mode synchrone, --capture-sync), sur ce thread dédié ; Shutdown() de la source le débloque.
+        const HRESULT hr = reader->ReadSample(DWORD(MF_SOURCE_READER_FIRST_VIDEO_STREAM), 0, &stream, &flags, &ts, &sample);
+        if (!running) break;
+        if (!on_sample(hr, flags, ts, sample.Get())) break;
     }
     if (SUCCEEDED(co)) CoUninitialize();
 }
@@ -413,7 +498,8 @@ MfCaptureSource::~MfCaptureSource() {
     if (impl_->event) CloseHandle(impl_->event);
 }
 
-bool MfCaptureSource::start(const std::wstring& needle, const std::wstring& mode) {
+bool MfCaptureSource::start(const std::wstring& needle, const std::wstring& mode, bool sync_read) {
+    impl_->sync_read = sync_read;
     // Échec (pilote, mode refusé, format non convertible...) : journalisé, ressources libérées, false ; l'appli
     // affiche alors la liste des périphériques au lieu d'un crash.
     try {
@@ -463,7 +549,14 @@ bool MfCaptureSource::start_impl(const std::wstring& needle, const std::wstring&
     ra->SetUINT32(MF_READWRITE_ENABLE_HARDWARE_TRANSFORMS, TRUE);
     ra->SetUINT32(MF_SOURCE_READER_ENABLE_ADVANCED_VIDEO_PROCESSING, TRUE);
     ra->SetUINT32(MF_LOW_LATENCY, TRUE);
+    if (!m.sync_read) {
+        m.callback.Attach(new ReaderCallback(&m, [](void* o, HRESULT hr, DWORD flags, LONGLONG ts, IMFSample* smp) {
+            return static_cast<Impl*>(o)->on_sample(hr, flags, ts, smp);
+        }));
+        ra->SetUnknown(MF_SOURCE_READER_ASYNC_CALLBACK, m.callback.Get());
+    }
     check_hr(MFCreateSourceReaderFromMediaSource(m.source.Get(), ra.Get(), &m.reader), "MFCreateSourceReader");
+    if (m.callback) m.callback->set_reader(m.reader.Get());
     m.reader->SetStreamSelection(DWORD(MF_SOURCE_READER_ALL_STREAMS), FALSE);
     m.reader->SetStreamSelection(DWORD(MF_SOURCE_READER_FIRST_VIDEO_STREAM), TRUE);
 
@@ -509,15 +602,31 @@ bool MfCaptureSource::start_impl(const std::wstring& needle, const std::wstring&
     m.label = narrow(chosen.name) + " (" + desc + ")";
     log_msg("Carte de capture : mode choisi %s, sortie %s", desc.c_str(), cl::output_name(m.output));
 
-    m.running = true;
-    m.thread  = std::thread([this] { impl_->loop(); });
+    m.discontinuity = true;
+    m.running       = true;
+    if (m.sync_read) {
+        m.thread = std::thread([this] { impl_->loop(); });
+    } else {
+        // Première demande ; les suivantes partent du rappel (ReaderCallback::OnReadSample).
+        check_hr(m.reader->ReadSample(DWORD(MF_SOURCE_READER_FIRST_VIDEO_STREAM), 0, nullptr, nullptr, nullptr, nullptr),
+                 "ReadSample (asynchrone)");
+    }
+    log_msg("Carte de capture : lecture %s", m.sync_read ? "synchrone (thread dédié, --capture-sync)" : "asynchrone");
     return true;
 }
 
 void MfCaptureSource::stop() {
     auto& m = *impl_;
     m.running = false;
-    if (m.source) m.source->Shutdown();  // débloque ReadSample
+    if (m.callback) {
+        // Asynchrone : plus aucun rappel ne touche à la source après detach() (attend au plus le rappel en
+        // cours, qui ne bloque pas) ; Flush annule la lecture en attente, attendue au plus 500 ms, jamais plus.
+        m.callback->detach();
+        if (m.reader && SUCCEEDED(m.reader->Flush(DWORD(MF_SOURCE_READER_ALL_STREAMS))) &&
+            WaitForSingleObject(m.callback->flushed(), 500) != WAIT_OBJECT_0)
+            log_msg("Carte de capture : Flush non confirmé en 500 ms (arrêt poursuivi)");
+    }
+    if (m.source) m.source->Shutdown();  // débloque ReadSample (mode synchrone)
     if (m.thread.joinable()) m.thread.join();
     // Tout ce qui référence des objets MF (échantillon gardé, vues sur les textures du pool du décodeur) part
     // avant le reader, la source et le gestionnaire DXGI ; MFShutdown en tout dernier.
@@ -531,6 +640,7 @@ void MfCaptureSource::stop() {
     m.en.Reset();
     m.vp_w = m.vp_h = 0;
     m.reader.Reset();
+    m.callback.Reset();
     m.source.Reset();
     m.devmgr.Reset();
     m.runtime.reset();

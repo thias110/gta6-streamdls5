@@ -52,7 +52,7 @@ bool App::open_source() {
         // Carte de capture : pas de fenêtre à chercher ni à recadrer (l'image HDMI est déjà la sortie de la
         // console) ; la mise à l'échelle avec bandes noires éventuelles reste faite par layout().
         auto cap = std::make_unique<MfCaptureSource>(d3d_);
-        if (!cap->start(cfg_.device, cfg_.mode)) {
+        if (!cap->start(cfg_.device, cfg_.mode, cfg_.capture_sync)) {
             std::wstring msg = L"Carte de capture introuvable ou inutilisable";
             msg += cfg_.device.empty() ? L"." : L" : \"" + cfg_.device + L"\".";
             msg += L"\n\nBranche-la (USB 3), vérifie qu'elle apparaît comme périphérique vidéo, et que la PS5 a "

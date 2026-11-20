@@ -26,6 +26,7 @@ struct Config {
     bool  list_devices  = false;  // liste les cartes de capture et les entrées audio (+ modes avec --device)
     std::wstring device;          // sous-chaîne du nom de la carte ; vide = auto (--source capture)
     std::wstring mode;            // "1920x1080@60" ; vide = auto (--source capture)
+    bool  capture_sync  = false;  // --capture-sync : lecture MF synchrone (thread dédié) au lieu d'asynchrone
     bool  audio         = true;   // relais du son de la carte (mode HDMI)
     std::wstring audio_device;    // sous-chaîne du nom de l'entrée audio ; vide = auto
     float audio_volume  = 1.0f;

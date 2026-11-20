@@ -19,6 +19,8 @@ const wchar_t* usage_text() {
   --mode <WxH[@fps]>          mode natif, ex. 1920x1080@60 ou 1280x720 (implique
                               --source capture ; défaut : >= 60 fps, puis la plus
                               grande résolution <= 4K, puis non compressé)
+  --capture-sync              lecture synchrone de la carte (ancien mode, repli si
+                              la lecture asynchrone par défaut pose problème)
   --list-devices              liste les cartes de capture et les entrées audio ;
                               avec --device ou --source capture : aussi les modes
                               natifs de la carte choisie
@@ -113,6 +115,7 @@ Config parse_command_line() {
         else if (s == L"--list-devices") c.list_devices = true;
         else if (s == L"--device") { c.device = value(i); capture_implied = true; }
         else if (s == L"--mode") { c.mode = value(i); capture_implied = true; }
+        else if (s == L"--capture-sync") c.capture_sync = true;
         else if (s == L"--no-audio") c.audio = false;
         else if (s == L"--audio-device") c.audio_device = value(i);
         else if (s == L"--audio-volume") c.audio_volume = number(i);

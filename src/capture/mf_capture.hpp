@@ -15,8 +15,9 @@ bool list_capture_modes(const std::wstring& needle, std::wstring& device, std::v
 //   CPU, sinon une seule copie vers le GPU.
 // - Conversion -> BGRA par le VideoProcessor D3D11 (couleurs BT.601/709, plage limitée/pleine lues dans le
 //   type média), conforme au contrat de SourceFrame.
-// - ReadSample tourne sur un thread dédié qui ne garde que l'image la plus récente et signale wait_handle() ;
-//   poll() ne bloque jamais (thread GPU/UI).
+// - Lecture asynchrone (IMFSourceReaderCallback) : on ne garde que l'image la plus récente et on signale
+//   wait_handle() ; poll() ne bloque jamais (thread GPU/UI) et stop() non plus (rappel détaché, Flush attendu
+//   500 ms au plus). --capture-sync : ancienne lecture synchrone sur un thread dédié (repli).
 // - SourceFrame::time = instant de capture sur l'horloge now_seconds() : horloge QPC du pilote si fournie,
 //   sinon horodatage MF (100 ns) recalé sur l'arrivée (voir capture_logic::TimestampMapper).
 class MfCaptureSource final : public FrameSource {
@@ -28,7 +29,8 @@ public:
 
     // needle : sous-chaîne du nom du périphérique (vide = détection auto) ;
     // mode : "1920x1080@60" ou "1920x1080" (vide = auto). Ne lève pas : false + journal en cas d'échec.
-    bool start(const std::wstring& needle, const std::wstring& mode);
+    // sync_read : lecture synchrone sur un thread dédié (--capture-sync) au lieu de l'asynchrone.
+    bool start(const std::wstring& needle, const std::wstring& mode, bool sync_read = false);
     void stop();
 
     bool        poll(SourceFrame& out) override;

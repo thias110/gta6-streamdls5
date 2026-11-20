@@ -33,6 +33,31 @@ OUT OF OR IN CONNECTION WITH THE SOFTWARE OR THE USE OR OTHER DEALINGS IN THE
 SOFTWARE.
 ```
 
+## NVIDIA Video Effects SDK (optionnel, non inclus)
+
+Backend facultatif (`-DRPENHANCE_NVVFX=ON`, `--interp nvvfx`, `--upscale nvvfx`). **Aucun fichier
+NVIDIA n'est inclus dans ce dépôt ni dans les binaires de rpenhance** : ni DLL, ni modèle, ni en-tête.
+
+- Le VFX SDK Core et ses features (Video Super Resolution, Video Frame Generation) sont téléchargés
+  par l'utilisateur depuis NVIDIA NGC (`scripts/install-nvvfx.ps1`, avec sa propre clé NGC) dans
+  `third_party/nvvfx-sdk/`, ignoré par git. D'après le catalogue NGC, leur usage est régi par le
+  *NVIDIA Software License Agreement* et les *Product-Specific Terms for NVIDIA AI Products* ; les
+  modèles par la licence indiquée pour chacun (*NVIDIA Community Model License* ou *NVIDIA Open
+  Model License*). Ces licences ne sont pas des licences open source : ne pas redistribuer ces
+  fichiers avec rpenhance.
+- À la compilation, seuls les en-têtes du SDK installé localement sont lus ; aucune bibliothèque
+  NVIDIA n'est liée. À l'exécution, les DLL sont chargées dynamiquement si elles sont présentes.
+- Configuration requise selon NVIDIA (guide VFX SDK 1.3) : pilote Windows ≥ 570.65 ; Video Frame
+  Generation uniquement sur GPU Ada ou Blackwell.
+- Avant de publier des mesures de qualité ou de performance de Video Frame Generation, vérifier
+  que la licence NVIDIA en vigueur le permet.
+- Le code de `src/nvvfx/` est original (MIT, rpenhance). Il suit la documentation publique de NVIDIA
+  (guide VFX SDK, guide NvCVImage) et l'ordre d'appels de l'exemple MIT
+  `VideoFrameGenerationEffectApp` (https://github.com/NVIDIA-Maxine/VFX-SDK-Samples) ; aucun code
+  n'en est copié. Le dépôt MIT https://github.com/NVIDIA-Maxine/Maxine-VFX-SDK (proxy
+  `NVVideoEffectsProxy.cpp`) n'est ni copié ni téléchargé : ses en-têtes (v0.7.6) ne couvrent pas
+  Video Frame Generation.
+
 ## Idées reprises (aucun code copié)
 
 - **SmoovPlay** (https://github.com/smoovplay/smoovplay, licence MIT, Copyright (c) 2026 the

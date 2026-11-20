@@ -107,7 +107,8 @@ Options : `rpenhance.exe --help`. Les plus utiles :
 
 | Option | Effet |
 |---|---|
-| `--upscale off\|bicubic\|vsr` | méthode d'upscale (défaut `vsr`) |
+| `--upscale off\|bicubic\|vsr\|nvvfx` | méthode d'upscale (défaut `vsr`) ; `nvvfx` : voir ci-dessous |
+| `--interp flow\|nvvfx` | interpolation maison (défaut) ou VFG du SDK NVIDIA, voir ci-dessous |
 | `--no-fg` | pas d'interpolation : latence minimale, VRR/tearing autorisé |
 | `--dup-threshold 1.2` | seuil de base des doublons (seuil fixe avec `--no-adaptive-dedupe`) |
 | `--no-adaptive-dedupe` | désactive le seuil adaptatif et le verrou de rythme |
@@ -120,6 +121,66 @@ Options : `rpenhance.exe --help`. Les plus utiles :
 | `--capturable` | l'overlay reste visible des captures d'écran (OBS, partage) |
 
 Le journal est écrit dans `rpenhance.log` à côté de l'exe (stats toutes les 5 s).
+
+## Backend optionnel : NVIDIA Video Effects SDK (VFG / VSR)
+
+Expérimental, **désactivé par défaut**, jamais testé à ce jour (écrit sans MSVC ni GPU, voir
+« Limites connues »). Il remplace, quand il est disponible :
+
+- l'interpolation maison par **Video Frame Generation** (VFG, filtre IA du NVIDIA Video Effects SDK)
+  avec `--interp nvvfx` : image générée à l'instant exact voulu entre les deux frames uniques qui
+  encadrent l'affichage (mode « timestep explicite »), jamais à travers une coupure (HOLD conservé) ;
+- l'upscale par la **Video Super Resolution** du SDK avec `--upscale nvvfx` (`--nvvfx-vsr-mode 0..4`,
+  défaut 3 = VSR_High).
+
+**Repli** : exe compilé sans l'option, SDK ou feature absents, DLL manquante, GPU non supporté, pilote
+trop ancien, échec de chargement ou d'exécution → message unique dans `rpenhance.log` et retour au
+pipeline actuel (flow maison ; RTX VSR du VideoProcessor puis bicubique). L'overlay affiche la voie
+réellement utilisée.
+
+**Exigences** (guide NVIDIA VFX SDK 1.3) : Windows 10/11 x64, pilote NVIDIA **≥ 570.65** ; VFG
+uniquement sur GPU **Ada (RTX 40) ou Blackwell (RTX 50)** ; VSR sur Turing et plus récents.
+
+**Licence** : le SDK (DLL, en-têtes, modèles) appartient à NVIDIA et n'est **pas fourni** avec
+rpenhance ni dans ce dépôt. D'après le catalogue NGC, il est régi par le *NVIDIA Software License
+Agreement* et les *Product-Specific Terms for NVIDIA AI Products*, les modèles par la licence indiquée
+pour chacun. Lis-les avant usage. **Avant de publier des mesures de VFG** (PSNR du selftest, temps
+GPU, comparaisons), vérifie que la licence en vigueur l'autorise : d'anciennes licences Maxine
+traitaient les résultats de benchmark comme informations confidentielles.
+
+Installation et compilation :
+
+```powershell
+# 1. Clé NGC personnelle (ngc.nvidia.com > Setup > Generate Personal Key), seulement en variable
+#    d'environnement de la session : jamais en argument, jamais dans un fichier versionné.
+$env:NGC_API_KEY = Read-Host -MaskInput 'Clé NGC'          # PowerShell 7
+# 2. SDK Core + features VSR et VFG dans third_party\nvvfx-sdk (ignoré par git)
+.\scripts\install-nvvfx.ps1 -Gpu 120                        # 120 = Blackwell, 89 = Ada
+Remove-Item Env:NGC_API_KEY
+# 3. Compilation avec l'option (lit seulement les en-têtes du SDK installé, ne lie aucune lib NVIDIA)
+cmake -S . -B build -A x64 -DRPENHANCE_NVVFX=ON              # -DNVVFX_SDK_DIR=<racine> si ailleurs
+cmake --build build --config Release
+.\build\Release\rpenhance.exe --interp nvvfx --upscale nvvfx
+```
+
+Le SDK est chargé dynamiquement (`LoadLibrary`) au premier usage, depuis `--nvvfx-dir`, puis
+`NVVFX_SDK_DIR`, `VFXSDK_ROOT`, `<exe>\nvvfx-sdk` et enfin le dossier donné à CMake. Le premier
+chargement d'un modèle peut prendre plusieurs secondes (l'image se fige pendant ce temps).
+
+Interop D3D11 ↔ CUDA : chaque texture est enregistrée une fois (`NvCVImage_InitFromD3DTexture`),
+puis mappée sur le flux CUDA du SDK, copiée GPU→GPU (`NvCVImage_Transfer`) et démappée. Les pixels
+ne passent jamais par le CPU, mais ce n'est pas du zéro copie strict : les filtres n'acceptent que de
+la mémoire CUDA linéaire, d'où une copie GPU par entrée (réutilisée : B d'une paire devient A de la
+suivante) et une par image générée. La synchronisation repose sur les garanties de
+`cudaGraphicsMapResources/UnmapResources` (le travail D3D11 émis avant le map précède le travail CUDA,
+le travail CUDA émis avant l'unmap précède le travail D3D11 suivant), sans attente CPU, et tout reste
+sur le thread GPU unique de l'application. Détails dans `src/nvvfx/nvvfx_backend.cpp`.
+
+Coût : VFG tourne en taille de sortie et une fois par image affichée qui tombe entre deux frames
+(jusqu'au taux de rafraîchissement de l'écran). NVIDIA annonce ~1,3 à 1,9 ms en 720p sur RTX
+4090/5090 (mode Medium) ; en 1440p à 144 Hz le budget peut ne pas tenir : `--vfg-mode low` ou une
+fréquence d'écran plus basse. Le temps GPU de VFG (flux CUDA) n'apparaît pas dans les mesures GPU de
+l'overlay.
 
 ## Tester sans PS5
 
@@ -172,6 +233,12 @@ protection du HUD et avec `--flow-scale 0.5`.
 - Impossible de vérifier depuis l'appli que VSR est réellement appliqué : le driver accepte
   l'extension, mais c'est le réglage de NVIDIA App qui décide. Compare avec Ctrl+Alt+C.
 - Pas de HDR.
+- Backend NVIDIA VFX (`--interp nvvfx`, `--upscale nvvfx`) : écrit sans MSVC, sans SDK installé et sans
+  GPU Ada/Blackwell. Vérifié seulement : syntaxe g++ avec des en-têtes Windows et SDK factices, absence
+  de liaison statique au SDK, configuration CMake de l'option, analyse du script PowerShell. Non
+  vérifiés : noms exacts des sélecteurs dans les en-têtes du SDK 1.3, comportement de
+  `NvCVImage_InitFromD3DTexture`/`Transfer` sur des textures BGRA de rpenhance, synchronisation réelle,
+  qualité et coût de VFG sur le flux Remote Play, URL de l'API NGC et structure de l'archive du SDK.
 
 ## Pistes pour la suite
 
@@ -183,4 +250,5 @@ protection du HUD et avec `--flow-scale 0.5`.
 
 rpenhance est distribué sous licence **MIT** (voir [`LICENSE`](LICENSE)). Dear ImGui (MIT, Omar
 Cornut), téléchargé à la compilation, et les projets dont des idées ont été reprises sont listés
-dans [`THIRD-PARTY-NOTICES.md`](THIRD-PARTY-NOTICES.md).
+dans [`THIRD-PARTY-NOTICES.md`](THIRD-PARTY-NOTICES.md). Le NVIDIA Video Effects SDK, optionnel, n'est
+pas inclus et reste sous licence NVIDIA (voir la section dédiée ci-dessus).

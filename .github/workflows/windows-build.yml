@@ -33,7 +33,8 @@ jobs:
       - name: Compilation Release
         run: cmake --build build --config Release --parallel
 
-      - name: Tests CPU (ctest dedupe, scene_cut, tap_protocol)
+      # Logique pure seulement : aucune carte de capture ni périphérique audio n'est ouvert dans la CI.
+      - name: Tests CPU (ctest dedupe, scene_cut, tap_protocol, capture_logic, audio_delay)
         working-directory: build
         run: ctest -C Release --output-on-failure
 

@@ -30,7 +30,7 @@ public:
 
     static constexpr double kMaxLag         = 0.25;    // s : au-delà, l'horodatage n'est pas crédible
     static constexpr double kFutureSlack    = 0.002;   // s : tolérance d'un horodatage pilote « en avance »
-    static constexpr double kDriftPerSecond = 0.001;   // remontée max du décalage (1 ms par seconde)
+    static constexpr double kDriftPerSecond = 0.0002;  // remontée max du décalage (0,2 ms par seconde, 200 ppm)
     static constexpr double kResyncGap      = 1.0;     // s : trou d'horodatage qui impose un recalage
 
     // device_qpc_hns : MFSampleExtension_DeviceReferenceSystemTime ; sample_hns : IMFSample::GetSampleTime ;

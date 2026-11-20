@@ -16,7 +16,8 @@ const wchar_t* usage_text() {
   --device <txt>              sous-chaîne du nom de la carte (implique --source
                               capture ; défaut : détection Elgato, AVerMedia,
                               « capture », « HDMI », « USB Video »..., sinon la 1re)
-  --mode <WxH[@fps]>          mode natif, ex. 1920x1080@60 ou 1280x720 (implique
+  --mode <WxH[@fps]>          mode natif, ex. 1920x1080@60 ou 1280x720 (sans @fps :
+                              la plus haute fréquence de cette taille ; implique
                               --source capture ; défaut : >= 60 fps, puis la plus
                               grande résolution <= 4K, puis non compressé)
   --capture-sync              lecture synchrone de la carte (ancien mode, repli si

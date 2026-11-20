@@ -170,6 +170,28 @@ int main() {
         parse_mode("1920x1080", r);
         expect(choose_mode(modes, r) == 2, "demandé 1920x1080 (toute fréquence) : premier non compressé",
                choose_mode(modes, r));
+        {  // --mode WxH sans fréquence : la plus haute fréquence d'abord, quel que soit l'ordre des modes
+            const std::vector<NativeMode> m2 = {
+                {1920, 1080, 30.0, Subtype::NV12}, {1920, 1080, 59.94, Subtype::NV12}, {1920, 1080, 60.0, Subtype::MJPG},
+                {1920, 1080, 25.0, Subtype::YUY2}, {1280, 720, 120.0, Subtype::NV12},
+            };
+            ModeRequest q;
+            parse_mode("1920x1080", q);
+            expect(choose_mode(m2, q) == 1, "1920x1080 : 59.94 NV12 (≈ 60, non compressé) plutôt que 30 ou MJPEG 60",
+                   choose_mode(m2, q));
+            auto m3 = m2;
+            m3.push_back({1920, 1080, 120.0, Subtype::MJPG});
+            expect(choose_mode(m3, q) == 5, "1920x1080 : 120 fps plutôt que 60", choose_mode(m3, q));
+            m3.push_back({1920, 1080, 240.0, Subtype::NV12});
+            m3.push_back({1920, 1080, 144.0, Subtype::NV12});
+            expect(choose_mode(m3, q) == 6, "1920x1080 : bornée à 144 (240 ~ 144, premier trouvé)", choose_mode(m3, q));
+            const std::vector<NativeMode> slow = {{1280, 720, 30.0, Subtype::MJPG}, {1280, 720, 50.0, Subtype::YUY2}};
+            parse_mode("1280x720", q);
+            expect(choose_mode(slow, q) == 1, "1280x720 sans 60 fps : la plus haute (50)", choose_mode(slow, q));
+            parse_mode("1920x1080@60", q);
+            const std::vector<NativeMode> m4 = {{1920, 1080, 59.94, Subtype::NV12}, {1920, 1080, 60.0, Subtype::NV12}};
+            expect(choose_mode(m4, q) == 1, "1920x1080@60 : 60 exact plutôt que 59.94", choose_mode(m4, q));
+        }
         parse_mode("1024x768@60", r);
         expect(choose_mode(modes, r) == -1, "demandé introuvable : -1", choose_mode(modes, r));
         expect(choose_mode({}, {}) == -1, "aucun mode : -1", choose_mode({}, {}));

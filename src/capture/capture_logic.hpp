@@ -81,7 +81,8 @@ bool parse_mode(std::string_view text, ModeRequest& out, std::string* error = nu
 
 // Index du mode retenu, -1 si aucun. Automatique : >= 59 fps d'abord, puis la plus grande résolution (bornée
 // à la 4K), puis la plus haute fréquence (<= 144), puis non compressé (moins de latence que le MJPEG).
-// Demandé : taille exacte et fréquence à +-1 fps près (si donnée), non compressé préféré.
+// Demandé : taille exacte. Fréquence donnée : à +-1 fps près, non compressé préféré, puis la plus proche.
+// Taille seule (--mode WxH) : la plus haute fréquence (>= 59 d'abord, <= 144, 59.94 ~ 60), puis non compressé.
 int choose_mode(const std::vector<NativeMode>& modes, const ModeRequest& req);
 
 // --- Format de sortie demandé au Source Reader -------------------------------------------------------------

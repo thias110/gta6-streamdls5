@@ -129,7 +129,15 @@ int choose_mode(const std::vector<NativeMode>& modes, const ModeRequest& req) {
             const bool match = m.width == req.width && m.height == req.height &&
                                (req.fps <= 0.0 || std::abs(m.fps - req.fps) < 1.0);
             if (!match) continue;
-            score = 1.0 + (is_uncompressed(m.subtype) ? 1.0 : 0.0);
+            const double unc = is_uncompressed(m.subtype) ? 5.0 : 0.0;
+            if (req.fps > 0.0) {
+                // Fréquence donnée : non compressé d'abord, puis la plus proche (60 plutôt que 59.94 pour @60).
+                score = 100.0 + unc - std::abs(m.fps - req.fps);
+            } else {
+                // Taille seule : la plus haute fréquence (>= 59 d'abord, bornée à 144 ; 59.94 ~ 60), puis non
+                // compressé.
+                score = 100.0 + (m.fps >= 59.0 ? 1e4 : 0.0) + std::round(std::min(m.fps, 144.0)) * 10.0 + unc;
+            }
         } else {
             const double px = double(std::min<uint64_t>(uint64_t(m.width) * m.height, 3840ull * 2160ull));
             score = (m.fps >= 59.0 ? 1e13 : 0.0) + px * 1e3 + std::min(m.fps, 144.0) * 10.0 +

@@ -290,7 +290,7 @@ modes, l'interpolation ajoute environ un intervalle entre images uniques ; `--no
    AVerMedia, « capture », « HDMI », « Cam Link », « Live Gamer », Magewell, « USB Video », UVC),
    sinon `--device "nom"`. Le meilleur mode est choisi automatiquement (≥ 60 fps, puis la plus grande
    résolution jusqu'à la 4K, puis non compressé plutôt que MJPEG) ; pour forcer : `--mode 1920x1080@60`
-   ou `--mode 1280x720` (n'importe quelle fréquence). La liste des modes est aussi dans `rpenhance.log`.
+   ou `--mode 1280x720` (la plus haute fréquence disponible pour cette taille). La liste des modes est aussi dans `rpenhance.log`.
 
 | Option | Effet |
 |---|---|

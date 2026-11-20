@@ -20,6 +20,9 @@ struct PipelineSettings {
     // Changement de plan (différence moyenne > cut.mean_max, ou corrélation des blocs / histogrammes) :
     // pas de flow, et HOLD : la frame précédente reste affichée jusqu'à l'instant de la nouvelle.
     CutParams   cut;
+    // --tap-trust-flags : croire les métadonnées de la source (frame tap) au lieu de les deviner. Désactivé :
+    // le pipeline ignore SourceFrame::meta (comportement inchangé).
+    bool        trust_source_flags = false;
     bool        compare       = false;  // moitié gauche = capture brute
     bool        flow_viz      = false;
     SynthParams synth;
@@ -90,20 +93,28 @@ private:
         bool        has_edges = false;
         bool        has_flow = false;
         bool        cut_before = false;  // changement de plan entre la précédente et celle-ci : HOLD
+        bool        damaged  = false;  // source : frame perdue avant celle-ci ou tronquée (trust_source_flags)
         bool        has_raw  = false;  // copie brute (mode comparaison uniquement)
     };
     UniqueFrame* newest();
     UniqueFrame& acquire_slot();
     // Lit la mesure de la capture en attente (sans attendre le GPU si wait = false) et la traite.
     void resolve_pending(bool wait);
+    // Ce que la source affirme de la frame (seulement avec settings.trust_source_flags).
+    struct SourceHint {
+        bool fresh   = false;  // nouveau contenu : unique sans passer par DupClassifier
+        bool damaged = false;  // perte avant / frame tronquée : ni interpolation vers elle ni depuis elle
+    };
     // Décision doublon / coupure puis ajout à l'historique (upscale, flow). d = nullptr : pas de mesure.
-    bool accept(const GpuTexture& src, double time, double arrival, UniqueFrame* last, const DiffResult* d);
+    bool accept(const GpuTexture& src, double time, double arrival, UniqueFrame* last, const DiffResult* d,
+                SourceHint hint);
 
     struct Pending {
         bool         active  = false;
         double       time    = 0.0, arrival = 0.0;
         UniqueFrame* ref     = nullptr;  // frame de référence de la mesure
         uint64_t     ref_id  = 0;
+        SourceHint   hint;
     };
 
     D3DContext&          d3d_;

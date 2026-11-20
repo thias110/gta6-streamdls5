@@ -8,6 +8,11 @@ enum class UpscaleMode : int {
     Nvvfx   = 3,  // VSR du NVIDIA Video Effects SDK (option RPENHANCE_NVVFX), repli sur Vsr
 };
 
+enum class SourceKind : int {
+    Wgc = 0,  // Windows Graphics Capture de la fenêtre de la remote play (défaut)
+    Tap = 1,  // frame tap : frames décodées déposées en mémoire partagée (format SmoovPlay v2)
+};
+
 enum class InterpMode : int {
     Flow  = 0,  // interpolation maison (flow par blocs + synthèse)
     Nvvfx = 1,  // Video Frame Generation du NVIDIA Video Effects SDK (option RPENHANCE_NVVFX), repli sur Flow
@@ -20,6 +25,9 @@ struct Config {
     bool  aspect_crop   = true;   // recadre la zone client en 16:9 (enlève les bandes noires)
     bool  test_pattern  = false;  // source synthétique 30 fps dans un flux 60 fps
     bool  selftest      = false;  // test qualité/perf sans fenêtre, puis quitte
+    SourceKind   source = SourceKind::Wgc;
+    std::wstring tap_name = L"Local\\smoovplay-tap";  // mémoire partagée du frame tap
+    bool  tap_trust_flags = false;  // utiliser les métadonnées du tap (répétition, pertes) dans le pipeline
     bool  allow_tearing = true;   // VRR/tearing quand la frame generation est coupée
     bool  debug_layer   = false;
     bool  warp          = false;  // rasteriseur logiciel WARP (CI sans GPU) au lieu du GPU matériel

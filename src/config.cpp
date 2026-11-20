@@ -37,6 +37,14 @@ const wchar_t* usage_text() {
   --no-crop                   ne recadre pas la capture en 16:9
   --no-tearing                pas de tearing/VRR sans frame generation
   --no-stats                  démarre avec l'overlay de stats masqué
+  --source wgc|tap            source des frames : capture de fenêtre (wgc, défaut) ou
+                              frame tap (frames décodées NV12/BGRA déposées en mémoire
+                              partagée par un autre programme, format SmoovPlay v2)
+  --tap-name <nom>            nom de la mémoire partagée du frame tap
+                              (défaut : Local\smoovplay-tap)
+  --tap-trust-flags           le pipeline croit les métadonnées du tap : répétition
+                              annoncée = doublon sans mesure, frame perdue/tronquée =
+                              pas d'interpolation vers ou depuis elle (désactivé par défaut)
   --test-pattern              source synthétique (pas besoin de PS5)
   --selftest                  mesure qualité/perf de l'interpolation puis quitte
   --debug                     active la couche de debug D3D11
@@ -81,6 +89,14 @@ Config parse_command_line() {
         else if (s == L"--no-stats") c.show_stats = false;
         else if (s == L"--test-pattern") c.test_pattern = true;
         else if (s == L"--selftest") c.selftest = true;
+        else if (s == L"--tap-name") c.tap_name = value(i);
+        else if (s == L"--tap-trust-flags") c.tap_trust_flags = true;
+        else if (s == L"--source") {
+            auto v = to_lower(value(i));
+            if (v == L"wgc") c.source = SourceKind::Wgc;
+            else if (v == L"tap") c.source = SourceKind::Tap;
+            else throw std::invalid_argument("--source attend wgc ou tap");
+        }
         else if (s == L"--debug") c.debug_layer = true;
         else if (s == L"--warp") c.warp = true;
         else if (s == L"--no-fg") c.frame_gen = false;
@@ -126,5 +142,6 @@ Config parse_command_line() {
     c.delay_scale   = std::clamp(c.delay_scale, 1.0f, 3.0f);
     c.flow_scale    = std::clamp(c.flow_scale, 0.5f, 1.0f);
     c.nvvfx_vsr_mode = std::clamp(c.nvvfx_vsr_mode, 0, 4);  // modes d'upscale du guide VSR (0..4)
+    if (c.tap_name.empty()) throw std::invalid_argument("--tap-name attend un nom non vide");
     return c;
 }

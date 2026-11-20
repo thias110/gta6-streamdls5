@@ -1,5 +1,6 @@
 #include "app.hpp"
 
+#include "capture/tap_source.hpp"
 #include "capture/test_source.hpp"
 #include "capture/wgc_capture.hpp"
 
@@ -39,6 +40,13 @@ App::~App() {
 bool App::open_source() {
     if (cfg_.test_pattern) {
         source_      = std::make_unique<TestSource>(d3d_, pipe_->compositor());
+        source_name_ = source_->name();
+        return true;
+    }
+    if (cfg_.source == SourceKind::Tap) {
+        // Pas de fenêtre à chercher : la mémoire partagée est créée (ou ouverte) tout de suite et l'émetteur peut
+        // démarrer plus tard. En attendant, la boucle dort sur l'event du tap (ou le vblank) : pas d'attente active.
+        source_      = std::make_unique<TapFrameSource>(d3d_, pipe_->compositor(), cfg_.tap_name);
         source_name_ = source_->name();
         return true;
     }
@@ -207,6 +215,11 @@ int App::run() {
     s.cut.enabled     = !cfg_.simple_cuts;
     s.synth.hud_protect = cfg_.hud_protect;
     s.delay_scale   = cfg_.delay_scale;
+    s.trust_source_flags = cfg_.tap_trust_flags && cfg_.source == SourceKind::Tap && !cfg_.test_pattern;
+    if (cfg_.tap_trust_flags && !s.trust_source_flags)
+        log_msg("--tap-trust-flags ignoré : il ne sert qu'avec --source tap");
+    else if (s.trust_source_flags)
+        log_msg("--tap-trust-flags : répétitions, pertes et images réparées annoncées par le tap utilisées telles quelles");
     s.flow_scale    = cfg_.flow_scale;
 
     NvvfxOptions nv;

@@ -684,4 +684,40 @@ float4 ps_test_pattern(VSOut i) : SV_Target {
 }
 )HLSL";
 
+// ---------------------------------------------------------------------------------------------
+// Frame tap (format SmoovPlay v2) : NV12 -> BGRA. Y en R8_UNORM pleine résolution, Cb/Cr en R8G8_UNORM demi-
+// résolution. Chrominance 4:2:0 interpolée, échantillons alignés à gauche horizontalement et centrés
+// verticalement (placement par défaut de H.264/H.265). La matrice (BT.709/BT.601, plage limitée/complète)
+// vient du CPU : rgb = g_row_* . (y, cb, cr) + g_row_*.w, avec y, cb, cr = octet / 255.
+inline constexpr char kTapNv12[] = R"HLSL(
+Texture2D<float>  g_tap_y  : register(t0);
+Texture2D<float2> g_tap_uv : register(t1);
+cbuffer TapCB : register(b0) {
+    float4 g_row_r;
+    float4 g_row_g;
+    float4 g_row_b;
+    float4 g_tap_size;  // xy : taille de Y, zw : taille de Cb/Cr
+};
+
+float4 ps_tap_nv12(VSOut i) : SV_Target {
+    int2   p   = int2(i.pos.xy);
+    float  y   = g_tap_y.Load(int3(p, 0));
+    float2 cuv = float2(float(p.x) * 0.5 + 0.5, (float(p.y) + 0.5) * 0.5) / g_tap_size.zw;
+    float2 c   = g_tap_uv.SampleLevel(g_linear, cuv, 0);
+    float3 yuv = float3(y, c.x, c.y);
+    float3 rgb = float3(dot(g_row_r.xyz, yuv) + g_row_r.w,
+                        dot(g_row_g.xyz, yuv) + g_row_g.w,
+                        dot(g_row_b.xyz, yuv) + g_row_b.w);
+    return float4(saturate(rgb), 1.0);
+}
+)HLSL";
+
+// Frame tap BGRA : copie dans la texture de sortie, alpha forcé à 1 (la spécification l'ignore).
+inline constexpr char kTapBgra[] = R"HLSL(
+Texture2D<float4> g_tap_bgra : register(t0);
+float4 ps_tap_bgra(VSOut i) : SV_Target {
+    return float4(g_tap_bgra.Load(int3(int2(i.pos.xy), 0)).rgb, 1.0);
+}
+)HLSL";
+
 }  // namespace shaders

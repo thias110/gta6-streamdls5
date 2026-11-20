@@ -42,6 +42,8 @@ add_executable(rpenhance WIN32
     src/gpu/profiler.cpp
     src/capture/wgc_capture.cpp
     src/capture/test_source.cpp
+    src/capture/tap_protocol.cpp
+    src/capture/tap_source.cpp
     src/pipeline/compositor.cpp
     src/pipeline/motion.cpp
     src/pipeline/dedupe.cpp
@@ -123,3 +125,6 @@ add_test(NAME dedupe COMMAND rpenhance_tests)
 add_executable(rpenhance_cut_tests tests/scene_cut_test.cpp src/pipeline/scene_cut.cpp)
 target_include_directories(rpenhance_cut_tests PRIVATE src)
 add_test(NAME scene_cut COMMAND rpenhance_cut_tests)
+add_executable(rpenhance_tap_tests tests/tap_protocol_test.cpp src/capture/tap_protocol.cpp)
+target_include_directories(rpenhance_tap_tests PRIVATE src)
+add_test(NAME tap_protocol COMMAND rpenhance_tap_tests)

@@ -44,20 +44,21 @@ void MotionEngine::init(D3DContext& d3d) {
     bd.Usage     = D3D11_USAGE_DEFAULT;
     bd.BindFlags = D3D11_BIND_UNORDERED_ACCESS;
     bd.MiscFlags = D3D11_RESOURCE_MISC_BUFFER_ALLOW_RAW_VIEWS;
-    check_hr(dev->CreateBuffer(&bd, nullptr, &diff_buf_), "diff buffer");
-
     D3D11_UNORDERED_ACCESS_VIEW_DESC ud{};
     ud.Format              = DXGI_FORMAT_R32_TYPELESS;
     ud.ViewDimension       = D3D11_UAV_DIMENSION_BUFFER;
     ud.Buffer.NumElements  = kDiffBytes / 4;
     ud.Buffer.Flags        = D3D11_BUFFER_UAV_FLAG_RAW;
-    check_hr(dev->CreateUnorderedAccessView(diff_buf_.Get(), &ud, &diff_uav_), "diff uav");
-
-    bd.Usage          = D3D11_USAGE_STAGING;
-    bd.BindFlags      = 0;
-    bd.MiscFlags      = 0;
-    bd.CPUAccessFlags = D3D11_CPU_ACCESS_READ;
-    check_hr(dev->CreateBuffer(&bd, nullptr, &diff_staging_), "diff staging");
+    D3D11_BUFFER_DESC sd = bd;
+    sd.Usage          = D3D11_USAGE_STAGING;
+    sd.BindFlags      = 0;
+    sd.MiscFlags      = 0;
+    sd.CPUAccessFlags = D3D11_CPU_ACCESS_READ;
+    for (int i = 0; i < 2; ++i) {
+        check_hr(dev->CreateBuffer(&bd, nullptr, &diff_buf_[i]), "diff buffer");
+        check_hr(dev->CreateUnorderedAccessView(diff_buf_[i].Get(), &ud, &diff_uav_[i]), "diff uav");
+        check_hr(dev->CreateBuffer(&sd, nullptr, &diff_staging_[i]), "diff staging");
+    }
 }
 
 void MotionEngine::build_pyramid(LumaPyramid& pyr, ID3D11ShaderResourceView* rgb, Size2D src) {
@@ -119,23 +120,32 @@ void MotionEngine::build_edges(const LumaPyramid& pyr, GpuTexture& out) {
     }
 }
 
-DiffResult MotionEngine::measure_difference(const LumaPyramid& a, const LumaPyramid& b) {
-    if (!a.valid() || !b.valid() || !(a.source == b.source)) return {255.0f, 255.0f, {}};
+void MotionEngine::begin_measure(const LumaPyramid& a, const LumaPyramid& b) {
+    if (!a.valid() || !b.valid() || !(a.source == b.source)) {
+        pending_           = -1;
+        pending_immediate_ = true;
+        immediate_         = {255.0f, 255.0f, {}};
+        return;
+    }
+    pending_immediate_ = false;
+    const int buf = write_;
+    write_ ^= 1;
+
     auto* ctx = d3d_->ctx();
     const size_t lvl = std::min<size_t>(1, a.levels.size() - 1);  // quart de résolution
     const GpuTexture& la = a.levels[lvl];
     const GpuTexture& lb = b.levels[lvl];
 
     const UINT zero[4] = {};
-    ctx->ClearUnorderedAccessViewUint(diff_uav_.Get(), zero);
+    ctx->ClearUnorderedAccessViewUint(diff_uav_[buf].Get(), zero);
     struct {
         uint32_t w, h, p0, p1;
     } cb{la.width, la.height, 0, 0};
-    ID3D11Buffer* buf = d3d_->constants(cb);
-    ctx->CSSetConstantBuffers(0, 1, &buf);
+    ID3D11Buffer* cbuf = d3d_->constants(cb);
+    ctx->CSSetConstantBuffers(0, 1, &cbuf);
     ID3D11ShaderResourceView* srvs[2] = {la.srv.Get(), lb.srv.Get()};
     ctx->CSSetShaderResources(0, 2, srvs);
-    ID3D11UnorderedAccessView* uav = diff_uav_.Get();
+    ID3D11UnorderedAccessView* uav = diff_uav_[buf].Get();
     ctx->CSSetUnorderedAccessViews(0, 1, &uav, nullptr);
     ctx->CSSetShader(cs_diff_.Get(), nullptr, 0);
     ctx->Dispatch(div_up(la.width, 16), div_up(la.height, 16), 1);
@@ -147,8 +157,8 @@ DiffResult MotionEngine::measure_difference(const LumaPyramid& a, const LumaPyra
     struct {
         uint32_t w, h, p0, p1;
     } ccb{ca.width, ca.height, 0, 0};
-    ID3D11Buffer* cbuf = d3d_->constants(ccb);
-    ctx->CSSetConstantBuffers(0, 1, &cbuf);
+    ID3D11Buffer* ccbuf = d3d_->constants(ccb);
+    ctx->CSSetConstantBuffers(0, 1, &ccbuf);
     ID3D11ShaderResourceView* csrvs[2] = {ca.srv.Get(), cb_.srv.Get()};
     ctx->CSSetShaderResources(0, 2, csrvs);
     ctx->CSSetUnorderedAccessViews(0, 1, &uav, nullptr);
@@ -156,9 +166,27 @@ DiffResult MotionEngine::measure_difference(const LumaPyramid& a, const LumaPyra
     ctx->Dispatch(1, 1, 1);
     d3d_->unbind_cs();
 
-    ctx->CopyResource(diff_staging_.Get(), diff_buf_.Get());
+    ctx->CopyResource(diff_staging_[buf].Get(), diff_buf_[buf].Get());
+    pending_ = buf;
+}
+
+bool MotionEngine::read_measure(DiffResult& out, bool wait) {
+    if (pending_immediate_) {
+        out                = immediate_;
+        pending_immediate_ = false;
+        return true;
+    }
+    if (pending_ < 0) return false;
+    auto* ctx = d3d_->ctx();
+    ID3D11Buffer* st = diff_staging_[pending_].Get();
     D3D11_MAPPED_SUBRESOURCE m{};
-    check_hr(ctx->Map(diff_staging_.Get(), 0, D3D11_MAP_READ, 0, &m), "Map diff");
+    HRESULT hr = ctx->Map(st, 0, D3D11_MAP_READ, D3D11_MAP_FLAG_DO_NOT_WAIT, &m);
+    if (hr == DXGI_ERROR_WAS_STILL_DRAWING) {
+        if (!wait) return false;
+        ++blocking_reads_;
+        hr = ctx->Map(st, 0, D3D11_MAP_READ, 0, &m);
+    }
+    check_hr(hr, "Map diff");
     const auto* v = static_cast<const uint32_t*>(m.pData);
     DiffResult r;
     r.max_tile = float(v[0]) / 1000.0f;
@@ -173,7 +201,16 @@ DiffResult MotionEngine::measure_difference(const LumaPyramid& a, const LumaPyra
     std::memcpy(r.cut.sab, f + 5, sizeof(r.cut.sab));
     std::memcpy(r.cut.ha, v + kCutHistA, sizeof(r.cut.ha));
     std::memcpy(r.cut.hb, v + kCutHistB, sizeof(r.cut.hb));
-    ctx->Unmap(diff_staging_.Get(), 0);
+    ctx->Unmap(st, 0);
+    pending_ = -1;
+    out      = r;
+    return true;
+}
+
+DiffResult MotionEngine::measure_difference(const LumaPyramid& a, const LumaPyramid& b) {
+    begin_measure(a, b);
+    DiffResult r{255.0f, 255.0f, {}};
+    read_measure(r, true);
     return r;
 }
 

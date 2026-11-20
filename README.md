@@ -23,8 +23,13 @@ fenêtre Remote Play ──WGC──► recadrage zone client 16:9
    + overlay ImGui (stats, réglages)
 ```
 
-- **Capture** : Windows Graphics Capture d'une fenêtre, zéro copie CPU. Fonctionne même si la
-  fenêtre est cachée derrière l'overlay (pas si elle est minimisée).
+- **Capture** : Windows Graphics Capture d'une fenêtre. Les pixels ne passent jamais par le CPU,
+  mais il y a des copies GPU : recadrage de la zone client (`CopySubresourceRegion`), puis copie de
+  la capture le temps que sa mesure de doublon soit lue. Seuls ~330 octets de mesures (doublon,
+  coupure) remontent au CPU par capture, via deux tampons de lecture alternés : la mesure est lue au
+  rendu suivant sans attendre le GPU, sauf si l'image à afficher en dépend (passthrough, frame
+  attendue en retard) ; le nombre de ces lectures bloquantes est affiché dans l'overlay. Fonctionne
+  même si la fenêtre est cachée derrière l'overlay (pas si elle est minimisée).
 - **Dédoublonnage** : différence moyenne par tuile sur la luminance ¼ de résolution. Par défaut le
   seuil est **adaptatif** : sur les 64 dernières captures, les répétitions (bruit de réencodage) et
   les vraies images forment deux populations ; le seuil glisse entre les deux (borné entre ¼ et 4×
@@ -68,7 +73,7 @@ fenêtre Remote Play ──WGC──► recadrage zone client 16:9
   fenêtre n'avait pas exactement la taille de la remote play. Remplacé par un rendu mis à l'échelle
   avec bandes noires.
 - Le « hash » par 256 `CopySubresourceRegion` + `Map` bloquant à chaque frame est remplacé par une
-  mesure GPU, plus fiable contre le bruit de compression.
+  mesure GPU, plus fiable contre le bruit de compression, lue sans blocage quand c'est possible.
 - Une texture était allouée à chaque frame ; le redimensionnement de la fenêtre capturée cassait la
   capture ; la barre de titre était capturée ; les guillemets dans la ligne de commande empêchaient de
   trouver la fenêtre ; `ResizeBuffers` échouait avec la RTV encore liée ; en-têtes manquants

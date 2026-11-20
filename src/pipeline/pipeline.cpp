@@ -20,6 +20,8 @@ void Pipeline::reset_history() {
     interval_ = jitter_ = 0.0;
     lag_ = lag_jitter_ = 0.0;
     lead_ = -1.0;
+    pending_.active = false;  // la capture en attente comparait à une frame qui n'existe plus
+    motion_.cancel_measure();
     dup_.reset();
     info_.cadence_period = 0;
 }
@@ -49,6 +51,8 @@ Pipeline::UniqueFrame& Pipeline::acquire_slot() {
 
 bool Pipeline::submit(const SourceFrame& f, double arrival) {
     if (!f.texture || output_.empty()) return false;
+    // La capture précédente doit être tranchée d'abord : sa décision change la frame de référence.
+    resolve_pending(true);
     auto* ctx = d3d_.ctx();
     auto* dev = d3d_.device();
     const GpuTexture& src = *f.texture;
@@ -60,17 +64,49 @@ bool Pipeline::submit(const SourceFrame& f, double arrival) {
     }
 
     // 1. Doublon ? (le flux remote play est à 60 fps, le jeu souvent à 30 : une frame sur deux est répétée)
+    //    La mesure est lancée ici et lue plus tard (resolve_pending), quand le GPU l'a terminée : plus de
+    //    Map bloquant à chaque capture. La capture est copiée car la source la réécrit au prochain poll().
     prof_.begin(ctx, GpuSection::Analyze);
     motion_.build_pyramid(scratch_, src.srv.Get(), cs);
     UniqueFrame* last = newest();
+    if (last && (settings.dedupe || settings.frame_gen)) {
+        motion_.begin_measure(scratch_, last->pyr);
+        pending_src_.ensure(dev, cs.width, cs.height, DXGI_FORMAT_B8G8R8A8_UNORM,
+                            D3D11_BIND_SHADER_RESOURCE | D3D11_BIND_RENDER_TARGET, "pending capture");
+        ctx->CopyResource(pending_src_.tex.Get(), src.tex.Get());
+        prof_.end(ctx, GpuSection::Analyze);
+        ctx->Flush();  // que le GPU commence la mesure tout de suite (lue sans attente plus tard)
+        pending_ = Pending{true, f.time, arrival, last, last->id};
+        return false;
+    }
+    prof_.end(ctx, GpuSection::Analyze);
+    return accept(src, f.time, arrival, last, nullptr);
+}
+
+void Pipeline::resolve_pending(bool wait) {
+    if (!pending_.active) return;
+    DiffResult d;
+    if (!motion_.read_measure(d, wait)) return;  // pas encore prête (wait = false)
+    const Pending p = pending_;
+    pending_.active = false;
+    info_.blocking_reads = motion_.blocking_reads();
+    // La référence est toujours la plus récente (rien n'est ajouté tant qu'une mesure est en attente) ;
+    // par prudence on vérifie qu'elle n'a pas été recyclée.
+    UniqueFrame* last = (p.ref && p.ref->valid && p.ref->id == p.ref_id) ? p.ref : nullptr;
+    accept(pending_src_, p.time, p.arrival, last, last ? &d : nullptr);
+}
+
+bool Pipeline::accept(const GpuTexture& src, double time, double arrival, UniqueFrame* last, const DiffResult* d) {
+    auto* ctx = d3d_.ctx();
+    auto* dev = d3d_.device();
+    const Size2D cs = src.size();
     bool  unique = true;
     bool  cut    = false;
     float metric = -1.0f;
-    if (last && (settings.dedupe || settings.frame_gen)) {
-        const DiffResult d = motion_.measure_difference(scratch_, last->pyr);
+    if (last && d) {
         if (settings.dedupe) {
-            metric = d.max_tile;
-            if (f.time > last->time) {  // horodatage non monotone : rejeté plus bas, sans fausser l'apprentissage
+            metric = d->max_tile;
+            if (time > last->time) {  // horodatage non monotone : rejeté plus bas, sans fausser l'apprentissage
                 const auto dec = dup_.classify(metric, {settings.dup_threshold, settings.adaptive_dedupe});
                 unique               = dec.unique;
                 info_.dup_threshold  = dec.threshold;
@@ -78,19 +114,18 @@ bool Pipeline::submit(const SourceFrame& f, double arrival) {
             }
         }
         // Changement de plan : le flow n'a pas de sens, on n'interpolera pas à travers (HOLD).
-        const CutFeatures cf = cut_features(d.cut);
-        cut            = is_scene_cut(d.mean, cf, settings.cut);
+        const CutFeatures cf = cut_features(d->cut);
+        cut            = is_scene_cut(d->mean, cf, settings.cut);
         info_.cut_corr = cf.corr;
         info_.cut_hist = cf.hist;
     }
-    prof_.end(ctx, GpuSection::Analyze);
-    if (last && f.time <= last->time) unique = false;  // horodatage non monotone
+    if (last && time <= last->time) unique = false;  // horodatage non monotone
     info_.last_metric = metric;
-    stats_.on_capture(f.time, unique, metric);
+    stats_.on_capture(time, unique, metric);
     if (!unique) return false;
 
     // Retard d'arrivée (horodatage de capture -> soumission) : il s'ajoute au retard d'interpolation.
-    const double lag = arrival - f.time;
+    const double lag = arrival - time;
     if (lag >= 0.0 && lag < 0.25) {
         if (lag_ == 0.0) lag_ = lag;
         lag_jitter_ = lag_jitter_ * 0.9 + std::abs(lag - lag_) * 0.1;
@@ -119,7 +154,7 @@ bool Pipeline::submit(const SourceFrame& f, double arrival) {
     slot.valid    = true;
     slot.id       = next_id_++;
     slot.prev_id  = 0;
-    slot.time     = f.time;
+    slot.time     = time;
     slot.has_flow = false;
     slot.cut_before = last && cut;
     ++info_.unique_frames;
@@ -161,6 +196,15 @@ bool Pipeline::render(ID3D11RenderTargetView* rtv, const D3D11_VIEWPORT& vp, dou
     double delay = interval_ * settings.delay_scale + lag_ + 2.0 * (jitter_ + lag_jitter_) + lead_;
     if (interval_ > 0.0) delay = std::min(delay, double(kRing - 2) * interval_);
     info_.delay_ms = float(delay * 1000.0);
+
+    // Capture en attente de sa mesure : on ne bloque sur le GPU que si l'image à afficher en a besoin
+    // (passthrough / visualisation : la plus récente ; FG : cible au-delà de la plus récente connue).
+    if (pending_.active) {
+        const UniqueFrame* nw   = newest();
+        const bool         need = !settings.frame_gen || settings.flow_viz || interval_ <= 0.0 || !nw ||
+                          display_time - delay >= nw->time;
+        resolve_pending(need);
+    }
 
     std::array<const UniqueFrame*, kRing> fr{};
     size_t n = 0;

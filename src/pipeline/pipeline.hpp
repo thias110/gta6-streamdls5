@@ -40,6 +40,7 @@ struct PipelineInfo {
     float          last_alpha    = 0.0f;
     bool           interpolating = false;
     uint64_t       unique_frames = 0;
+    uint64_t       blocking_reads = 0;  // lectures de mesure qui ont dû attendre le GPU
 };
 
 // capture -> dédoublonnage -> upscale -> flow (paire précédente) ; puis à chaque rafraîchissement
@@ -53,7 +54,10 @@ public:
     Size2D output_size() const { return output_; }
 
     // `arrival` : instant (now_seconds) où la capture a été récupérée ; sert à mesurer son retard.
-    bool submit(const SourceFrame& f, double arrival);  // true si la frame est nouvelle (pas un doublon)
+    // La décision doublon / nouvelle est différée : la mesure GPU est lue au prochain render() qui en
+    // a besoin ou au prochain submit(). Renvoie true seulement si la frame a été retenue tout de suite
+    // (pas de mesure nécessaire).
+    bool submit(const SourceFrame& f, double arrival);
     // `display_time` : instant prévu d'affichage (vblank) de l'image rendue ; = now si inconnu.
     bool render(ID3D11RenderTargetView* rtv, const D3D11_VIEWPORT& vp, double now, double display_time);  // true si frame générée
     void reset_history();
@@ -81,6 +85,17 @@ private:
     };
     UniqueFrame* newest();
     UniqueFrame& acquire_slot();
+    // Lit la mesure de la capture en attente (sans attendre le GPU si wait = false) et la traite.
+    void resolve_pending(bool wait);
+    // Décision doublon / coupure puis ajout à l'historique (upscale, flow). d = nullptr : pas de mesure.
+    bool accept(const GpuTexture& src, double time, double arrival, UniqueFrame* last, const DiffResult* d);
+
+    struct Pending {
+        bool         active  = false;
+        double       time    = 0.0, arrival = 0.0;
+        UniqueFrame* ref     = nullptr;  // frame de référence de la mesure
+        uint64_t     ref_id  = 0;
+    };
 
     D3DContext&          d3d_;
     GpuProfiler&         prof_;
@@ -91,7 +106,9 @@ private:
     Upscaler             upscaler_;
 
     std::array<UniqueFrame, kRing> ring_;
-    LumaPyramid                scratch_;
+    LumaPyramid                scratch_;      // pyramide de la capture en cours / en attente
+    GpuTexture                 pending_src_;  // copie de la capture en attente de sa mesure
+    Pending                    pending_;
     Size2D                     capture_{}, output_{};
     uint64_t                   next_id_ = 1;
     double                     interval_ = 0.0, jitter_ = 0.0;

@@ -78,6 +78,7 @@ void ImguiOverlay::render(ID3D11RenderTargetView* rtv, const OverlayModel& m, Pi
                          stats.interval_offset(), "intervalle frames uniques (ms)", 0.0f, 80.0f, ImVec2(360, 50));
 
         ImGui::SeparatorText("GPU (ms)");
+        ImGui::TextDisabled("lectures de mesure bloquantes : %llu", static_cast<unsigned long long>(info.blocking_reads));
         ImGui::Text("analyse %.2f  upscale %.2f  flow %.2f  rendu %.2f", prof.ms(GpuSection::Analyze),
                     prof.ms(GpuSection::Upscale), prof.ms(GpuSection::Flow), prof.ms(GpuSection::Compose));
 

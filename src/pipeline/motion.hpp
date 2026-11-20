@@ -37,7 +37,20 @@ public:
     void build_pyramid(LumaPyramid& pyr, ID3D11ShaderResourceView* rgb, Size2D src);
     // Masque de bords dilaté (Sobel + max 3x3) du niveau 0, pour la protection du HUD dans ps_synth.
     void build_edges(const LumaPyramid& pyr, GpuTexture& out);
-    // Lecture CPU immédiate (attend le GPU, ~0.1 ms de travail).
+    // Mesure asynchrone en double tampon : begin_measure() lance les noyaux et la copie vers l'un des
+    // deux tampons de lecture ; read_measure() lit la mesure lancée auparavant. wait = false : pas
+    // d'attente du GPU, renvoie false si elle n'est pas encore prête (rien n'est consommé) ;
+    // wait = true : attend si besoin (compté dans blocking_reads()). Une seule mesure en attente :
+    // un nouveau begin_measure() remplace la précédente non lue.
+    void begin_measure(const LumaPyramid& a, const LumaPyramid& b);
+    bool read_measure(DiffResult& out, bool wait);
+    bool measure_pending() const { return pending_ >= 0 || pending_immediate_; }
+    void cancel_measure() {
+        pending_           = -1;
+        pending_immediate_ = false;
+    }
+    uint64_t blocking_reads() const { return blocking_reads_; }
+    // Lecture immédiate (attend le GPU) : begin_measure + read_measure(wait = true). Pour le selftest.
     DiffResult measure_difference(const LumaPyramid& a, const LumaPyramid& b);
     // Flow X -> Y en UV normalisés sur la grille de blocs 8x8 du niveau 0 (R32G32F).
     // `temporal` : flow de la paire précédente (prédicteur), multiplié par temporal_sign.
@@ -49,7 +62,12 @@ private:
     ComPtr<ID3D11ComputeShader>         cs_luma_rgb_, cs_luma_down_, cs_diff_, cs_cut_, cs_motion_, cs_propagate_,
                                         cs_median_, cs_sobel_, cs_dilate_;
     GpuTexture                          edge_tmp_;
-    ComPtr<ID3D11Buffer>                diff_buf_, diff_staging_;
-    ComPtr<ID3D11UnorderedAccessView>   diff_uav_;
+    ComPtr<ID3D11Buffer>                diff_buf_[2], diff_staging_[2];
+    ComPtr<ID3D11UnorderedAccessView>   diff_uav_[2];
+    int                                 write_ = 0;      // tampon du prochain begin_measure()
+    int                                 pending_ = -1;   // tampon à lire, -1 = aucun
+    bool                                pending_immediate_ = false;  // résultat connu sans GPU (pyramides incompatibles)
+    DiffResult                          immediate_;
+    uint64_t                            blocking_reads_ = 0;
     std::vector<GpuTexture>             level_flow_, level_tmp_;
 };

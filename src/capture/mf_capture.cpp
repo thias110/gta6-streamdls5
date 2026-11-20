@@ -31,19 +31,18 @@ std::vector<Device> enum_devices() {
     IMFActivate** arr = nullptr;
     UINT32        n   = 0;
     check_hr(MFEnumDeviceSources(attr.Get(), &arr, &n), "MFEnumDeviceSources");
-    std::vector<Device> out;
-    for (UINT32 i = 0; i < n; ++i) {
-        Device d;
-        d.activate.Attach(arr[i]);
+    // Toutes les références sont prises d'abord (et le tableau libéré) : rien ne fuit si la suite échoue.
+    std::vector<Device> out(n);
+    for (UINT32 i = 0; i < n; ++i) out[i].activate.Attach(arr[i]);
+    CoTaskMemFree(arr);
+    for (auto& d : out) {
         WCHAR* name = nullptr;
         UINT32 len  = 0;
         if (SUCCEEDED(d.activate->GetAllocatedString(MF_DEVSOURCE_ATTRIBUTE_FRIENDLY_NAME, &name, &len))) {
             d.name.assign(name, len);
             CoTaskMemFree(name);
         }
-        out.push_back(std::move(d));
     }
-    CoTaskMemFree(arr);
     return out;
 }
 
@@ -107,7 +106,10 @@ struct MfCaptureSource::Impl {
     UINT32                                 vp_w = 0, vp_h = 0;
     bool                                   vp_full = false, vp_601 = false;
     GpuTexture                             out;
-    ComPtr<ID3D11Texture2D>                staging, upload;  // chemin mémoire système
+    // Chemin mémoire système : deux textures staging en alternance (Map n'attend pas la copie GPU précédente).
+    ComPtr<ID3D11Texture2D>                staging[2], upload;
+    int                                    staging_i = 0;
+    std::string                            error;  // dernière erreur fatale (thread de rendu)
     bool                                   logged_path = false;
 
     void read_format();
@@ -123,7 +125,9 @@ void MfCaptureSource::Impl::read_format() {
     UINT32 w = 0, h = 0;
     MFGetAttributeSize(cur.Get(), MF_MT_FRAME_SIZE, &w, &h);
     const UINT32 range  = MFGetAttributeUINT32(cur.Get(), MF_MT_VIDEO_NOMINAL_RANGE, MFNominalRange_16_235);
-    const UINT32 matrix = MFGetAttributeUINT32(cur.Get(), MF_MT_YUV_MATRIX, MFVideoTransferMatrix_BT709);
+    // Matrice absente du type média : BT.601 en SD (< 720 lignes), BT.709 au-delà (même règle que le frame tap).
+    const UINT32 matrix = MFGetAttributeUINT32(cur.Get(), MF_MT_YUV_MATRIX,
+                                               h < 720 ? MFVideoTransferMatrix_BT601 : MFVideoTransferMatrix_BT709);
     std::lock_guard lk(mu);
     width      = w;
     height     = h;
@@ -150,7 +154,13 @@ void MfCaptureSource::Impl::loop() {
         }
         if (flags & MF_SOURCE_READERF_CURRENTMEDIATYPECHANGED) {
             read_format();
-            log_msg("Carte de capture : nouveau format %ux%u", width, height);
+            UINT32 w = 0, h = 0;
+            {
+                std::lock_guard lk(mu);
+                w = width;
+                h = height;
+            }
+            log_msg("Carte de capture : nouveau format %ux%u", w, h);
         }
         if (!sample) continue;
         {
@@ -234,8 +244,8 @@ bool MfCaptureSource::Impl::upload_system_memory(IMFMediaBuffer* buf, UINT32 w, 
     auto* dev = d3d.device();
     auto* ctx = d3d.ctx();
     D3D11_TEXTURE2D_DESC have{};
-    if (staging) staging->GetDesc(&have);
-    if (!staging || have.Width != w || have.Height != h) {
+    if (staging[0]) staging[0]->GetDesc(&have);
+    if (!staging[0] || have.Width != w || have.Height != h) {
         D3D11_TEXTURE2D_DESC d{};
         d.Width            = w;
         d.Height           = h;
@@ -245,9 +255,11 @@ bool MfCaptureSource::Impl::upload_system_memory(IMFMediaBuffer* buf, UINT32 w, 
         d.SampleDesc.Count = 1;
         d.Usage            = D3D11_USAGE_STAGING;
         d.CPUAccessFlags   = D3D11_CPU_ACCESS_WRITE;
-        staging.Reset();
+        staging[0].Reset();
+        staging[1].Reset();
         upload.Reset();
-        check_hr(dev->CreateTexture2D(&d, nullptr, &staging), "NV12 staging");
+        check_hr(dev->CreateTexture2D(&d, nullptr, &staging[0]), "NV12 staging");
+        check_hr(dev->CreateTexture2D(&d, nullptr, &staging[1]), "NV12 staging");
         d.Usage          = D3D11_USAGE_DEFAULT;
         d.CPUAccessFlags = 0;
         d.BindFlags      = D3D11_BIND_RENDER_TARGET;
@@ -261,12 +273,22 @@ bool MfCaptureSource::Impl::upload_system_memory(IMFMediaBuffer* buf, UINT32 w, 
     const bool two_d = SUCCEEDED(buf->QueryInterface(IID_PPV_ARGS(&b2)));
     if (two_d) {
         if (FAILED(b2->Lock2D(&src, &pitch))) return false;
+        if (pitch < LONG(w)) {  // pas négatif (image de bas en haut) ou trop court : pas un NV12 exploitable
+            b2->Unlock2D();
+            return false;
+        }
     } else {
         if (FAILED(buf->Lock(&src, nullptr, &len))) return false;
         pitch = LONG(w);
+        if (size_t(len) < size_t(w) * h * 3 / 2) {  // tampon plus court qu'une image NV12 : lecture hors limites
+            buf->Unlock();
+            return false;
+        }
     }
+    ID3D11Texture2D* stg = staging[staging_i].Get();
+    staging_i ^= 1;
     D3D11_MAPPED_SUBRESOURCE m{};
-    const HRESULT hr = ctx->Map(staging.Get(), 0, D3D11_MAP_WRITE, 0, &m);
+    const HRESULT hr = ctx->Map(stg, 0, D3D11_MAP_WRITE, 0, &m);
     if (SUCCEEDED(hr)) {
         auto* dst = static_cast<BYTE*>(m.pData);
         for (UINT32 y = 0; y < h; ++y) std::memcpy(dst + size_t(y) * m.RowPitch, src + size_t(y) * pitch, w);
@@ -274,8 +296,8 @@ bool MfCaptureSource::Impl::upload_system_memory(IMFMediaBuffer* buf, UINT32 w, 
         BYTE*       uv_dst = dst + size_t(m.RowPitch) * h;
         for (UINT32 y = 0; y < h / 2; ++y)
             std::memcpy(uv_dst + size_t(y) * m.RowPitch, uv_src + size_t(y) * pitch, w);
-        ctx->Unmap(staging.Get(), 0);
-        ctx->CopyResource(upload.Get(), staging.Get());
+        ctx->Unmap(stg, 0);
+        ctx->CopyResource(upload.Get(), stg);
     }
     if (two_d) b2->Unlock2D();
     else buf->Unlock();
@@ -294,6 +316,18 @@ MfCaptureSource::~MfCaptureSource() {
 }
 
 bool MfCaptureSource::start(const std::wstring& needle, const std::wstring& mode) {
+    // Échec (pilote, mode refusé, format non convertible...) : journalisé, ressources libérées, false ; l'appli
+    // affiche alors la liste des périphériques au lieu d'un crash.
+    try {
+        if (start_impl(needle, mode)) return true;
+    } catch (const std::exception& e) {
+        log_msg("Carte de capture : démarrage impossible (%s)", e.what());
+    }
+    stop();
+    return false;
+}
+
+bool MfCaptureSource::start_impl(const std::wstring& needle, const std::wstring& mode) {
     auto& m   = *impl_;
     m.runtime = std::make_unique<MfRuntime>();
 
@@ -407,6 +441,17 @@ void MfCaptureSource::stop() {
     m.running = false;
     if (m.source) m.source->Shutdown();  // débloque ReadSample
     if (m.thread.joinable()) m.thread.join();
+    // Tout ce qui référence des objets MF (échantillon gardé, vues sur les textures du pool du décodeur) part
+    // avant le reader, la source et le gestionnaire DXGI ; MFShutdown en tout dernier.
+    {
+        std::lock_guard lk(m.mu);
+        m.latest.Reset();
+    }
+    m.views.clear();
+    m.out_view.Reset();
+    m.vp.Reset();
+    m.en.Reset();
+    m.vp_w = m.vp_h = 0;
     m.reader.Reset();
     m.source.Reset();
     m.devmgr.Reset();
@@ -414,6 +459,18 @@ void MfCaptureSource::stop() {
 }
 
 bool MfCaptureSource::poll(SourceFrame& out) {
+    if (impl_->failed) return false;
+    try {
+        return poll_impl(out);
+    } catch (const std::exception& e) {
+        impl_->error = e.what();
+        log_msg("Carte de capture : conversion impossible (%s) ; arrêt de la source", e.what());
+        impl_->failed = true;
+        return false;
+    }
+}
+
+bool MfCaptureSource::poll_impl(SourceFrame& out) {
     auto& m = *impl_;
     ComPtr<IMFSample> sample;
     double t = 0.0;

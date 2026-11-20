@@ -27,6 +27,9 @@ public:
     std::string name() const override;
 
 private:
+    bool start_impl(const std::wstring& needle, const std::wstring& mode);
+    bool poll_impl(SourceFrame& out);
+
     struct Impl;
     std::unique_ptr<Impl> impl_;
 };

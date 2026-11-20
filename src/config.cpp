@@ -10,6 +10,8 @@ const wchar_t* usage_text() {
   --list                      liste les fenêtres capturables
   --windowed                  fenêtre classique au lieu de l'overlay plein écran
   --monitor <n>               moniteur de l'overlay (0, 1, ...)
+  --capturable                l'overlay reste visible des captures d'écran
+                              (par défaut il en est exclu)
   --upscale off|bicubic|vsr   méthode d'upscale (défaut : vsr)
   --sharpness <0..1>          netteté du mode bicubic (défaut : 0.35)
   --no-fg                     désactive la frame generation
@@ -71,6 +73,7 @@ Config parse_command_line() {
         else if (s == L"--no-adaptive-dedupe") c.adaptive_dedupe = false;
         else if (s == L"--simple-cuts") c.simple_cuts = true;
         else if (s == L"--no-hud-protect") c.hud_protect = false;
+        else if (s == L"--capturable") c.capturable = true;
         else if (s == L"--delay") c.delay_scale = number(i);
         else if (s == L"--upscale") {
             auto v = to_lower(value(i));

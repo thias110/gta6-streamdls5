@@ -27,7 +27,8 @@ struct Config {
     bool  adaptive_dedupe = true; // le seuil suit le bruit de fond (dup_threshold = base) + verrou de rythme 2/3
     float delay_scale   = 1.15f;
     bool  simple_cuts   = false;
-    bool  hud_protect   = true;   // protection du HUD/texte fixe (masque de bords) dans la synthèse  // coupures : seulement la différence moyenne (pas corrélation/histogramme)  // marge du retard d'interpolation (x intervalle entre frames uniques)
+    bool  hud_protect   = true;
+    bool  capturable    = false;  // l'overlay peut être capturé (OBS, partage d'écran) ; défaut : exclu   // protection du HUD/texte fixe (masque de bords) dans la synthèse  // coupures : seulement la différence moyenne (pas corrélation/histogramme)  // marge du retard d'interpolation (x intervalle entre frames uniques)
 };
 
 Config parse_command_line();  // lève std::invalid_argument

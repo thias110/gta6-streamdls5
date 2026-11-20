@@ -10,6 +10,10 @@
 
 extern IMGUI_IMPL_API LRESULT ImGui_ImplWin32_WndProcHandler(HWND hWnd, UINT msg, WPARAM wParam, LPARAM lParam);
 
+#ifndef WDA_EXCLUDEFROMCAPTURE
+#define WDA_EXCLUDEFROMCAPTURE 0x00000011  // Windows 10 2004+ (SDK anciens)
+#endif
+
 namespace {
 enum HotkeyId { kHkStats = 1, kHkUpscale, kHkFrameGen, kHkCompare, kHkFlow, kHkQuit };
 
@@ -100,6 +104,16 @@ void App::create_window() {
     }
     if (!hwnd_) throw_hr(HRESULT_FROM_WIN32(GetLastError()), "CreateWindowEx");
     refresh_hz_ = query_refresh_rate();
+
+    // L'overlay ne doit jamais être recapturé (enregistreur, partage d'écran, capture d'écran de
+    // l'appli elle-même) : il disparaît des captures, la remote play dessous reste visible.
+    if (!cfg_.windowed && !cfg_.capturable) {
+        if (SetWindowDisplayAffinity(hwnd_, WDA_EXCLUDEFROMCAPTURE))
+            log_msg("Overlay exclu des captures d'écran (WDA_EXCLUDEFROMCAPTURE)");
+        else
+            log_msg("SetWindowDisplayAffinity a échoué (erreur %lu, Windows 10 2004+ requis) : l'overlay reste capturable",
+                    static_cast<unsigned long>(GetLastError()));
+    }
 }
 
 double App::query_refresh_rate() const {

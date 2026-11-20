@@ -54,7 +54,11 @@ fenêtre Remote Play ──WGC──► recadrage zone client 16:9
   Sur une coupure, pas d'interpolation : l'image précédente est tenue (**HOLD**) jusqu'à l'instant
   de la nouvelle. `--simple-cuts` revient au seul critère d'origine.
 - **Overlay** : fenêtre plein écran au-dessus de la remote play, qui ne prend **jamais le focus**.
-  La manette reste donc branchée sur la remote play.
+  La manette reste donc branchée sur la remote play. Il est exclu des captures d'écran
+  (`SetWindowDisplayAffinity(WDA_EXCLUDEFROMCAPTURE)`, Windows 10 2004+) : un enregistreur ou un
+  partage d'écran voit la remote play d'origine, et une capture d'écran entier ne peut pas
+  reboucler sur l'overlay (la capture WGC de la fenêtre remote play ne l'incluait déjà pas).
+  `--capturable` pour streamer l'image améliorée (OBS en capture d'écran).
 
 ## Ce qui a été corrigé par rapport à la phase 1 d'origine
 
@@ -107,6 +111,7 @@ Options : `rpenhance.exe --help`. Les plus utiles :
 | `--delay 1.15` | marge du retard ; à monter si l'image saccade quand le réseau varie |
 | `--windowed` | fenêtre classique au lieu de l'overlay |
 | `--monitor 1` | overlay sur un autre écran |
+| `--capturable` | l'overlay reste visible des captures d'écran (OBS, partage) |
 
 Le journal est écrit dans `rpenhance.log` à côté de l'exe (stats toutes les 5 s).
 

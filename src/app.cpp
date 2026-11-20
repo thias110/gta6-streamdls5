@@ -40,25 +40,35 @@ App::~App() {
 }
 
 bool App::open_source() {
-    if (cfg_.hdmi) {
+    if (cfg_.test_pattern) {
+        // Avec --source capture : mire au profil « câble » (répétitions exactes, sans gigue), sans matériel.
+        source_ = std::make_unique<TestSource>(d3d_, pipe_->compositor(),
+                                               cfg_.capture_source() ? TestSource::Profile::Cable
+                                                                     : TestSource::Profile::RemotePlay);
+        source_name_ = source_->name();
+        return true;
+    }
+    if (cfg_.capture_source()) {
+        // Carte de capture : pas de fenêtre à chercher ni à recadrer (l'image HDMI est déjà la sortie de la
+        // console) ; la mise à l'échelle avec bandes noires éventuelles reste faite par layout().
         auto cap = std::make_unique<MfCaptureSource>(d3d_);
         if (!cap->start(cfg_.device, cfg_.mode)) {
-            std::wstring msg = L"Carte de capture introuvable";
+            std::wstring msg = L"Carte de capture introuvable ou inutilisable";
             msg += cfg_.device.empty() ? L"." : L" : \"" + cfg_.device + L"\".";
             msg += L"\n\nBranche-la (USB 3), vérifie qu'elle apparaît comme périphérique vidéo, et que la PS5 a "
-                   L"HDCP désactivé (Paramètres > Système > HDMI).\nPériphériques vidéo vus :\n";
-            for (const auto& n : list_capture_devices()) msg += L"  • " + n + L"\n";
+                   L"HDCP désactivé (Paramètres > Système > HDMI). La cause exacte (mode, format) est dans "
+                   L"rpenhance.log.\nPériphériques vidéo vus :\n";
+            try {
+                for (const auto& n : list_capture_devices()) msg += L"  • " + n + L"\n";
+            } catch (const std::exception& e) {
+                msg += L"  (énumération impossible : " + widen(e.what()) + L")\n";
+            }
             log_msg("%s", narrow(msg).c_str());
             MessageBoxW(nullptr, msg.c_str(), L"rpenhance", MB_OK | MB_ICONWARNING);
             return false;
         }
         source_name_ = cap->name();
         source_      = std::move(cap);
-        return true;
-    }
-    if (cfg_.test_pattern) {
-        source_      = std::make_unique<TestSource>(d3d_, pipe_->compositor());
-        source_name_ = source_->name();
         return true;
     }
     if (cfg_.source == SourceKind::Tap) {
@@ -263,9 +273,11 @@ int App::run() {
                     "du VideoProcessor");
     }
 
-    passive_ = !cfg_.windowed && !cfg_.hdmi;
+    // Remote Play (wgc/tap) : overlay passif qui laisse le focus (et la manette) à la remote play. Carte de
+    // capture : la manette est sur la console, la fenêtre plein écran peut prendre le focus.
+    passive_ = !cfg_.windowed && !cfg_.capture_source();
     if (!open_source()) return 1;
-    if (cfg_.hdmi && cfg_.audio) {
+    if (cfg_.capture_source() && !cfg_.test_pattern && cfg_.audio) {
         try {
             audio_.start(cfg_.audio_device, source_name_, cfg_.audio_volume);
         } catch (const std::exception& e) {
@@ -293,7 +305,7 @@ int App::run() {
     model.source_name  = source_name_;
     model.adapter      = d3d_.adapter_name();
     model.overlay_mode = passive_;
-    model.hdmi         = cfg_.hdmi;
+    model.hdmi         = cfg_.capture_source();
     model.audio        = audio_.running() ? &audio_ : nullptr;
     model.audio_volume = cfg_.audio_volume;
     log_msg("Démarré : %s, overlay %s, %.0f Hz", source_name_.c_str(), passive_ ? "oui" : "non", refresh_hz_);
@@ -308,7 +320,9 @@ int App::run() {
         }
         if (quit_) break;
         if (!source_->alive()) {
-            log_msg(cfg_.hdmi ? "La carte de capture a cessé d'envoyer des images." : "La fenêtre capturée a été fermée.");
+            log_msg(cfg_.capture_source() ? "La carte de capture a cessé d'envoyer des images (débranchée, fin de "
+                                            "flux ou conversion impossible : voir plus haut)."
+                                          : "La fenêtre capturée a été fermée.");
             break;
         }
         if (resize_pending_) {

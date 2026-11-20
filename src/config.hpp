@@ -11,6 +11,7 @@ enum class UpscaleMode : int {
 enum class SourceKind : int {
     Wgc = 0,  // Windows Graphics Capture de la fenêtre de la remote play (défaut)
     Tap = 1,  // frame tap : frames décodées déposées en mémoire partagée (format SmoovPlay v2)
+    Capture = 2,  // carte de capture HDMI (Media Foundation) : PS5 branchée par câble
 };
 
 enum class InterpMode : int {
@@ -21,10 +22,9 @@ enum class InterpMode : int {
 struct Config {
     std::wstring window;          // sous-chaîne du titre ; vide = auto ("PS Remote Play", "chiaki")
     bool  list_windows  = false;
-    bool  hdmi          = false;  // carte de capture HDMI au lieu de la fenêtre Remote Play
-    bool  list_devices  = false;
-    std::wstring device;          // sous-chaîne du nom de la carte ; vide = auto
-    std::wstring mode;            // "1920x1080@60" ; vide = auto
+    bool  list_devices  = false;  // liste les cartes de capture et les entrées audio (+ modes avec --device)
+    std::wstring device;          // sous-chaîne du nom de la carte ; vide = auto (--source capture)
+    std::wstring mode;            // "1920x1080@60" ; vide = auto (--source capture)
     bool  audio         = true;   // relais du son de la carte (mode HDMI)
     std::wstring audio_device;    // sous-chaîne du nom de l'entrée audio ; vide = auto
     float audio_volume  = 1.0f;
@@ -33,6 +33,7 @@ struct Config {
     bool  test_pattern  = false;  // source synthétique 30 fps dans un flux 60 fps
     bool  selftest      = false;  // test qualité/perf sans fenêtre, puis quitte
     SourceKind   source = SourceKind::Wgc;
+    bool  capture_source() const { return source == SourceKind::Capture; }  // carte de capture (ou sa mire)
     std::wstring tap_name = L"Local\\smoovplay-tap";  // mémoire partagée du frame tap
     bool  tap_trust_flags = false;  // utiliser les métadonnées du tap (répétition, pertes) dans le pipeline
     bool  selftest_tap  = false;  // contrôle du frame tap (avec tests/tap_writer) sans fenêtre, puis quitte

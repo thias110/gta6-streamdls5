@@ -1,4 +1,5 @@
 #include "mf_capture.hpp"
+#include "capture_logic.hpp"
 
 #include <mfapi.h>
 #include <mferror.h>
@@ -8,14 +9,23 @@
 #include <cmath>
 #include <cwchar>
 #include <mutex>
+#include <optional>
 #include <thread>
 
+namespace cl = capture_logic;
+
 namespace {
+
+// MFSampleExtension_DeviceReferenceSystemTime (déclaré seulement par les SDK récents, d'où la copie) : instant
+// de capture sur l'horloge QPC du système, en 100 ns. Même base que now_seconds().
+const GUID kDeviceReferenceSystemTime = {0x6523775a, 0xba2d, 0x405f, {0xb2, 0xc5, 0x01, 0xff, 0x88, 0xe2, 0xe8, 0xf6}};
 
 // MFStartup/MFShutdown comptés en références.
 struct MfRuntime {
     MfRuntime() { check_hr(MFStartup(MF_VERSION, MFSTARTUP_NOSOCKET), "MFStartup"); }
     ~MfRuntime() { MFShutdown(); }
+    MfRuntime(const MfRuntime&)            = delete;
+    MfRuntime& operator=(const MfRuntime&) = delete;
 };
 
 struct Device {
@@ -46,28 +56,66 @@ std::vector<Device> enum_devices() {
     return out;
 }
 
-const char* subtype_name(const GUID& g) {
-    if (g == MFVideoFormat_NV12) return "NV12";
-    if (g == MFVideoFormat_YUY2) return "YUY2";
-    if (g == MFVideoFormat_MJPG) return "MJPEG";
-    if (g == MFVideoFormat_RGB32) return "RGB32";
-    if (g == MFVideoFormat_P010) return "P010";
-    if (g == MFVideoFormat_H264) return "H264";
-    if (g == MFVideoFormat_HEVC) return "HEVC";
-    return "autre";
+std::vector<std::wstring> names_of(const std::vector<Device>& devices) {
+    std::vector<std::wstring> names;
+    for (const auto& d : devices) names.push_back(d.name);
+    return names;
 }
 
-bool is_uncompressed(const GUID& g) {
-    return g == MFVideoFormat_NV12 || g == MFVideoFormat_YUY2 || g == MFVideoFormat_RGB32 || g == MFVideoFormat_P010;
+cl::Subtype to_subtype(const GUID& g) {
+    if (g == MFVideoFormat_NV12) return cl::Subtype::NV12;
+    if (g == MFVideoFormat_YUY2) return cl::Subtype::YUY2;
+    if (g == MFVideoFormat_MJPG) return cl::Subtype::MJPG;
+    if (g == MFVideoFormat_RGB32) return cl::Subtype::RGB32;
+    if (g == MFVideoFormat_P010) return cl::Subtype::P010;
+    if (g == MFVideoFormat_H264) return cl::Subtype::H264;
+    if (g == MFVideoFormat_HEVC) return cl::Subtype::HEVC;
+    return cl::Subtype::Other;
+}
+
+// Modes natifs du premier flux vidéo (types gardés dans le même ordre si `types` est fourni).
+std::vector<cl::NativeMode> native_modes(IMFSourceReader* reader, std::vector<ComPtr<IMFMediaType>>* types) {
+    std::vector<cl::NativeMode> modes;
+    for (DWORD i = 0;; ++i) {
+        ComPtr<IMFMediaType> t;
+        const HRESULT hr = reader->GetNativeMediaType(DWORD(MF_SOURCE_READER_FIRST_VIDEO_STREAM), i, &t);
+        if (hr == MF_E_NO_MORE_TYPES || FAILED(hr)) break;
+        GUID   sub{};
+        UINT32 w = 0, h = 0, num = 0, den = 0;
+        t->GetGUID(MF_MT_SUBTYPE, &sub);
+        MFGetAttributeSize(t.Get(), MF_MT_FRAME_SIZE, &w, &h);
+        MFGetAttributeRatio(t.Get(), MF_MT_FRAME_RATE, &num, &den);
+        modes.push_back({w, h, den ? double(num) / double(den) : 0.0, to_subtype(sub)});
+        if (types) types->push_back(t);
+    }
+    return modes;
 }
 
 }  // namespace
 
 std::vector<std::wstring> list_capture_devices() {
     MfRuntime rt;
-    std::vector<std::wstring> names;
-    for (auto& d : enum_devices()) names.push_back(d.name);
-    return names;
+    return names_of(enum_devices());
+}
+
+bool list_capture_modes(const std::wstring& needle, std::wstring& device, std::vector<std::string>& modes) {
+    MfRuntime rt;
+    auto      devices = enum_devices();
+    const int idx     = cl::pick_device(names_of(devices), needle);
+    if (idx < 0) return false;
+    Device& d = devices[size_t(idx)];
+    device    = d.name;
+    ComPtr<IMFMediaSource> source;
+    check_hr(d.activate->ActivateObject(IID_PPV_ARGS(&source)), "ActivateObject (carte de capture)");
+    ComPtr<IMFSourceReader> reader;
+    const HRESULT hr = MFCreateSourceReaderFromMediaSource(source.Get(), nullptr, &reader);
+    if (SUCCEEDED(hr))
+        for (const auto& m : native_modes(reader.Get(), nullptr)) modes.push_back(cl::describe(m));
+    reader.Reset();
+    source->Shutdown();
+    d.activate->ShutdownObject();
+    check_hr(hr, "MFCreateSourceReader");
+    return true;
 }
 
 // ---------------------------------------------------------------------------------------------
@@ -80,20 +128,25 @@ struct MfCaptureSource::Impl {
     ComPtr<IMFDXGIDeviceManager> devmgr;
     ComPtr<IMFMediaSource>      source;
     ComPtr<IMFSourceReader>     reader;
+    cl::Output                  output = cl::Output::NV12;  // format demandé au Source Reader (fixé au démarrage)
 
     std::thread       thread;
     std::atomic<bool> running{false};
     std::atomic<bool> failed{false};
+    std::atomic<int>  basis{int(cl::TimestampMapper::Basis::None)};
     HANDLE            event = nullptr;
 
-    std::mutex        mu;              // protège latest*, width, height, colour
+    cl::TimestampMapper mapper;        // thread de lecture uniquement
+
+    std::mutex        mu;              // protège latest*, width, height, colour, stride
     ComPtr<IMFSample> latest;
     double            latest_time = 0.0;
     UINT32            width = 0, height = 0;
     bool              full_range = false, bt601 = false;
+    LONG              stride = 0;      // MF_MT_DEFAULT_STRIDE (RGB32 en mémoire système ; < 0 = bas en haut)
     std::string       label;
 
-    // Conversion NV12 -> BGRA (thread de rendu uniquement)
+    // Conversion -> BGRA par le VideoProcessor (thread de rendu uniquement)
     struct InView {
         ComPtr<ID3D11Texture2D>               tex;
         UINT                                  slice = 0;
@@ -110,13 +163,14 @@ struct MfCaptureSource::Impl {
     ComPtr<ID3D11Texture2D>                staging[2], upload;
     int                                    staging_i = 0;
     std::string                            error;  // dernière erreur fatale (thread de rendu)
-    bool                                   logged_path = false;
+    bool                                   logged_path  = false;
+    int                                    logged_basis = -1;
 
     void read_format();
     void loop();
     bool ensure_processor(UINT32 w, UINT32 h, bool full, bool b601);
     ID3D11VideoProcessorInputView* input_view(ID3D11Texture2D* tex, UINT slice);
-    bool upload_system_memory(IMFMediaBuffer* buf, UINT32 w, UINT32 h);
+    bool upload_system_memory(IMFMediaBuffer* buf, UINT32 w, UINT32 h, LONG default_stride);
 };
 
 void MfCaptureSource::Impl::read_format() {
@@ -128,19 +182,23 @@ void MfCaptureSource::Impl::read_format() {
     // Matrice absente du type média : BT.601 en SD (< 720 lignes), BT.709 au-delà (même règle que le frame tap).
     const UINT32 matrix = MFGetAttributeUINT32(cur.Get(), MF_MT_YUV_MATRIX,
                                                h < 720 ? MFVideoTransferMatrix_BT601 : MFVideoTransferMatrix_BT709);
+    const LONG   st     = LONG(MFGetAttributeUINT32(cur.Get(), MF_MT_DEFAULT_STRIDE, 0));  // UINT32 signé
     std::lock_guard lk(mu);
     width      = w;
     height     = h;
     full_range = range == MFNominalRange_0_255;
     bt601      = matrix == MFVideoTransferMatrix_BT601;
+    stride     = st;
 }
 
 void MfCaptureSource::Impl::loop() {
-    CoInitializeEx(nullptr, COINIT_MULTITHREADED);
+    const HRESULT co = CoInitializeEx(nullptr, COINIT_MULTITHREADED);
+    bool discontinuity = true;  // première image : recalage de l'horodatage
     while (running) {
         DWORD             stream = 0, flags = 0;
         LONGLONG          ts = 0;
         ComPtr<IMFSample> sample;
+        // Bloquant (mode synchrone), mais sur ce thread dédié : ni le thread GPU ni l'UI n'attendent la carte.
         HRESULT hr = reader->ReadSample(DWORD(MF_SOURCE_READER_FIRST_VIDEO_STREAM), 0, &stream, &flags, &ts, &sample);
         if (FAILED(hr)) {
             if (running) log_msg("Carte de capture : ReadSample en échec (0x%08lX)", static_cast<unsigned long>(hr));
@@ -153,7 +211,13 @@ void MfCaptureSource::Impl::loop() {
             break;
         }
         if (flags & MF_SOURCE_READERF_CURRENTMEDIATYPECHANGED) {
-            read_format();
+            try {
+                read_format();
+            } catch (const std::exception& e) {
+                log_msg("Carte de capture : nouveau format illisible (%s)", e.what());
+                failed = true;
+                break;
+            }
             UINT32 w = 0, h = 0;
             {
                 std::lock_guard lk(mu);
@@ -161,29 +225,41 @@ void MfCaptureSource::Impl::loop() {
                 h = height;
             }
             log_msg("Carte de capture : nouveau format %ux%u", w, h);
+            discontinuity = true;
         }
+        if (flags & MF_SOURCE_READERF_STREAMTICK) discontinuity = true;  // trou dans le flux
         if (!sample) continue;
+
+        const double           arrival = now_seconds();
+        std::optional<int64_t> device_time;
+        UINT64                 dt = 0;
+        if (SUCCEEDED(sample->GetUINT64(kDeviceReferenceSystemTime, &dt)) && dt) device_time = int64_t(dt);
+        if (MFGetAttributeUINT32(sample.Get(), MFSampleExtension_Discontinuity, FALSE)) discontinuity = true;
+        const double t = mapper.map(device_time, int64_t(ts), discontinuity, arrival);
+        discontinuity  = false;
+        basis          = int(mapper.basis());
         {
             std::lock_guard lk(mu);
-            latest      = sample;
-            latest_time = now_seconds();
+            latest      = sample;  // la précédente, jamais lue, est abandonnée : seule la plus récente compte
+            latest_time = t;
         }
         SetEvent(event);
     }
-    CoUninitialize();
+    if (SUCCEEDED(co)) CoUninitialize();
 }
 
 bool MfCaptureSource::Impl::ensure_processor(UINT32 w, UINT32 h, bool full, bool b601) {
     if (vp && vp_w == w && vp_h == h && vp_full == full && vp_601 == b601) return true;
     auto* vdev = d3d.video_device();
     auto* vctx = d3d.video_ctx();
-    if (!vdev || !vctx) throw std::runtime_error("API vidéo D3D11 indisponible : conversion NV12 impossible");
+    if (!vdev || !vctx) throw std::runtime_error("API vidéo D3D11 indisponible : conversion en BGRA impossible");
 
     views.clear();
     out_view.Reset();
     vp.Reset();
     en.Reset();
 
+    // Le même VideoProcessor sert pour une entrée NV12 (YUV -> RGB) ou RGB32 (copie, alpha opaque).
     D3D11_VIDEO_PROCESSOR_CONTENT_DESC cd{};
     cd.InputFrameFormat = D3D11_VIDEO_FRAME_FORMAT_PROGRESSIVE;
     cd.InputFrameRate   = {60, 1};
@@ -202,15 +278,16 @@ bool MfCaptureSource::Impl::ensure_processor(UINT32 w, UINT32 h, bool full, bool
     ovd.ViewDimension = D3D11_VPOV_DIMENSION_TEXTURE2D;
     check_hr(vdev->CreateVideoProcessorOutputView(out.tex.Get(), en.Get(), &ovd, &out_view), "output view (capture)");
 
-    D3D11_VIDEO_PROCESSOR_COLOR_SPACE yuv{};
-    yuv.YCbCr_Matrix  = b601 ? 0 : 1;
-    yuv.Nominal_Range = full ? D3D11_VIDEO_PROCESSOR_NOMINAL_RANGE_0_255 : D3D11_VIDEO_PROCESSOR_NOMINAL_RANGE_16_235;
+    D3D11_VIDEO_PROCESSOR_COLOR_SPACE in_cs{};
+    in_cs.RGB_Range     = 0;  // entrée RGB32 : pleine plage
+    in_cs.YCbCr_Matrix  = b601 ? 0 : 1;
+    in_cs.Nominal_Range = full ? D3D11_VIDEO_PROCESSOR_NOMINAL_RANGE_0_255 : D3D11_VIDEO_PROCESSOR_NOMINAL_RANGE_16_235;
     D3D11_VIDEO_PROCESSOR_COLOR_SPACE rgb{};
     rgb.RGB_Range = 0;
     const RECT r{0, 0, LONG(w), LONG(h)};
     vctx->VideoProcessorSetStreamFrameFormat(vp.Get(), 0, D3D11_VIDEO_FRAME_FORMAT_PROGRESSIVE);
     vctx->VideoProcessorSetStreamAutoProcessingMode(vp.Get(), 0, FALSE);
-    vctx->VideoProcessorSetStreamColorSpace(vp.Get(), 0, &yuv);
+    vctx->VideoProcessorSetStreamColorSpace(vp.Get(), 0, &in_cs);
     vctx->VideoProcessorSetOutputColorSpace(vp.Get(), &rgb);
     vctx->VideoProcessorSetStreamSourceRect(vp.Get(), 0, TRUE, &r);
     vctx->VideoProcessorSetStreamDestRect(vp.Get(), 0, TRUE, &r);
@@ -220,8 +297,11 @@ bool MfCaptureSource::Impl::ensure_processor(UINT32 w, UINT32 h, bool full, bool
     vp_h    = h;
     vp_full = full;
     vp_601  = b601;
-    log_msg("Carte de capture : conversion NV12 %ux%u (BT.%s, plage %s) -> BGRA", w, h, b601 ? "601" : "709",
-            full ? "pleine" : "limitée");
+    if (output == cl::Output::NV12)
+        log_msg("Carte de capture : conversion NV12 %ux%u (BT.%s, plage %s) -> BGRA", w, h, b601 ? "601" : "709",
+                full ? "pleine" : "limitée");
+    else
+        log_msg("Carte de capture : RGB32 %ux%u -> BGRA", w, h);
     return true;
 }
 
@@ -240,74 +320,92 @@ ID3D11VideoProcessorInputView* MfCaptureSource::Impl::input_view(ID3D11Texture2D
     return views.back().view.Get();
 }
 
-bool MfCaptureSource::Impl::upload_system_memory(IMFMediaBuffer* buf, UINT32 w, UINT32 h) {
-    auto* dev = d3d.device();
-    auto* ctx = d3d.ctx();
+bool MfCaptureSource::Impl::upload_system_memory(IMFMediaBuffer* buf, UINT32 w, UINT32 h, LONG default_stride) {
+    auto*             dev  = d3d.device();
+    auto*             ctx  = d3d.ctx();
+    const bool        nv12 = output == cl::Output::NV12;
+    const DXGI_FORMAT fmt  = nv12 ? DXGI_FORMAT_NV12 : DXGI_FORMAT_B8G8R8A8_UNORM;
+    const size_t      row  = nv12 ? size_t(w) : size_t(w) * 4;  // octets utiles par ligne (plan Y pour le NV12)
+
     D3D11_TEXTURE2D_DESC have{};
     if (staging[0]) staging[0]->GetDesc(&have);
-    if (!staging[0] || have.Width != w || have.Height != h) {
+    if (!staging[0] || have.Width != w || have.Height != h || have.Format != fmt) {
         D3D11_TEXTURE2D_DESC d{};
         d.Width            = w;
         d.Height           = h;
         d.MipLevels        = 1;
         d.ArraySize        = 1;
-        d.Format           = DXGI_FORMAT_NV12;
+        d.Format           = fmt;
         d.SampleDesc.Count = 1;
         d.Usage            = D3D11_USAGE_STAGING;
         d.CPUAccessFlags   = D3D11_CPU_ACCESS_WRITE;
         staging[0].Reset();
         staging[1].Reset();
         upload.Reset();
-        check_hr(dev->CreateTexture2D(&d, nullptr, &staging[0]), "NV12 staging");
-        check_hr(dev->CreateTexture2D(&d, nullptr, &staging[1]), "NV12 staging");
+        check_hr(dev->CreateTexture2D(&d, nullptr, &staging[0]), "staging (capture)");
+        check_hr(dev->CreateTexture2D(&d, nullptr, &staging[1]), "staging (capture)");
         d.Usage          = D3D11_USAGE_DEFAULT;
         d.CPUAccessFlags = 0;
         d.BindFlags      = D3D11_BIND_RENDER_TARGET;
-        check_hr(dev->CreateTexture2D(&d, nullptr, &upload), "NV12 upload");
+        check_hr(dev->CreateTexture2D(&d, nullptr, &upload), "upload (capture)");
     }
 
-    BYTE* src   = nullptr;
-    LONG  pitch = 0;
+    // scan0 : première ligne affichée ; step : pas entre deux lignes (négatif pour une image de bas en haut).
+    BYTE*               scan0 = nullptr;
+    ptrdiff_t           step  = 0;
     ComPtr<IMF2DBuffer> b2;
-    DWORD len = 0;
-    const bool two_d = SUCCEEDED(buf->QueryInterface(IID_PPV_ARGS(&b2)));
+    const bool          two_d = SUCCEEDED(buf->QueryInterface(IID_PPV_ARGS(&b2)));
     if (two_d) {
-        if (FAILED(b2->Lock2D(&src, &pitch))) return false;
-        if (pitch < LONG(w)) {  // pas négatif (image de bas en haut) ou trop court : pas un NV12 exploitable
-            b2->Unlock2D();
-            return false;
-        }
+        LONG pitch = 0;
+        if (FAILED(b2->Lock2D(&scan0, &pitch))) return false;
+        step = pitch;
     } else {
-        if (FAILED(buf->Lock(&src, nullptr, &len))) return false;
-        pitch = LONG(w);
-        if (size_t(len) < size_t(w) * h * 3 / 2) {  // tampon plus court qu'une image NV12 : lecture hors limites
+        BYTE* base = nullptr;
+        DWORD len  = 0;
+        if (FAILED(buf->Lock(&base, nullptr, &len))) return false;
+        step = nv12 ? ptrdiff_t(w) : (default_stride ? ptrdiff_t(default_stride) : ptrdiff_t(row));
+        const size_t abs_step = size_t(step < 0 ? -step : step);
+        const size_t need     = nv12 ? abs_step * h * 3 / 2 : abs_step * h;
+        if (abs_step < row || size_t(len) < need) {  // tampon plus court qu'une image : lecture hors limites
             buf->Unlock();
             return false;
         }
+        scan0 = step < 0 ? base + abs_step * (h - 1) : base;
     }
+    auto unlock = [&] {
+        if (two_d) b2->Unlock2D();
+        else buf->Unlock();
+    };
+    // NV12 : plans Y puis UV contigus, donc pas positif obligatoire ; RGB32 : |pas| >= une ligne.
+    if ((nv12 && step < ptrdiff_t(w)) || size_t(step < 0 ? -step : step) < row) {
+        unlock();
+        return false;
+    }
+
     ID3D11Texture2D* stg = staging[staging_i].Get();
     staging_i ^= 1;
     D3D11_MAPPED_SUBRESOURCE m{};
     const HRESULT hr = ctx->Map(stg, 0, D3D11_MAP_WRITE, 0, &m);
     if (SUCCEEDED(hr)) {
         auto* dst = static_cast<BYTE*>(m.pData);
-        for (UINT32 y = 0; y < h; ++y) std::memcpy(dst + size_t(y) * m.RowPitch, src + size_t(y) * pitch, w);
-        const BYTE* uv_src = src + size_t(pitch) * h;
-        BYTE*       uv_dst = dst + size_t(m.RowPitch) * h;
-        for (UINT32 y = 0; y < h / 2; ++y)
-            std::memcpy(uv_dst + size_t(y) * m.RowPitch, uv_src + size_t(y) * pitch, w);
+        for (UINT32 y = 0; y < h; ++y) std::memcpy(dst + size_t(y) * m.RowPitch, scan0 + ptrdiff_t(y) * step, row);
+        if (nv12) {
+            const BYTE* uv_src = scan0 + step * ptrdiff_t(h);
+            BYTE*       uv_dst = dst + size_t(m.RowPitch) * h;
+            for (UINT32 y = 0; y < h / 2; ++y)
+                std::memcpy(uv_dst + size_t(y) * m.RowPitch, uv_src + ptrdiff_t(y) * step, row);
+        }
         ctx->Unmap(stg, 0);
         ctx->CopyResource(upload.Get(), stg);
     }
-    if (two_d) b2->Unlock2D();
-    else buf->Unlock();
+    unlock();
     return SUCCEEDED(hr);
 }
 
 // ---------------------------------------------------------------------------------------------
 
 MfCaptureSource::MfCaptureSource(D3DContext& d3d) : impl_(std::make_unique<Impl>(d3d)) {
-    impl_->event = CreateEventW(nullptr, FALSE, FALSE, nullptr);
+    impl_->event = CreateEventW(nullptr, FALSE, FALSE, nullptr);  // auto-reset, signalé à chaque image
 }
 
 MfCaptureSource::~MfCaptureSource() {
@@ -328,40 +426,32 @@ bool MfCaptureSource::start(const std::wstring& needle, const std::wstring& mode
 }
 
 bool MfCaptureSource::start_impl(const std::wstring& needle, const std::wstring& mode) {
-    auto& m   = *impl_;
-    m.runtime = std::make_unique<MfRuntime>();
+    auto& m = *impl_;
+    if (!m.d3d.video_device() || !m.d3d.video_ctx()) {
+        log_msg("Carte de capture : API vidéo D3D11 indisponible sur ce GPU/pilote (nécessaire à la conversion en BGRA).");
+        return false;
+    }
+    cl::ModeRequest req;
+    std::string     err;
+    if (!cl::parse_mode(narrow(mode), req, &err)) {
+        log_msg("Carte de capture : %s", err.c_str());
+        return false;
+    }
 
+    m.runtime    = std::make_unique<MfRuntime>();
     auto devices = enum_devices();
     if (devices.empty()) {
         log_msg("Aucune carte de capture / périphérique vidéo détecté.");
         return false;
     }
-    const Device* chosen = nullptr;
-    if (!needle.empty()) {
-        const auto n = to_lower(needle);
-        for (auto& d : devices)
-            if (to_lower(d.name).find(n) != std::wstring::npos) { chosen = &d; break; }
-    } else {
-        static const wchar_t* kHints[] = {L"elgato", L"avermedia", L"capture", L"hdmi", L"cam link", L"live gamer",
-                                          L"magewell", L"usb video", L"uvc"};
-        for (auto* hint : kHints) {
-            for (auto& d : devices)
-                if (to_lower(d.name).find(hint) != std::wstring::npos) { chosen = &d; break; }
-            if (chosen) break;
-        }
-        if (!chosen) chosen = &devices.front();
-    }
-    if (!chosen) {
+    const int idx = cl::pick_device(names_of(devices), needle);
+    if (idx < 0) {
         log_msg("Aucun périphérique ne contient \"%s\".", narrow(needle).c_str());
         return false;
     }
+    const Device& chosen = devices[size_t(idx)];
 
-    UINT32 req_w = 0, req_h = 0;
-    double req_fps = 0.0;
-    if (!mode.empty() && std::swscanf(mode.c_str(), L"%ux%u@%lf", &req_w, &req_h, &req_fps) < 2)
-        throw std::invalid_argument("--mode attend LARGEURxHAUTEUR@FPS, par exemple 1920x1080@60");
-
-    check_hr(chosen->activate->ActivateObject(IID_PPV_ARGS(&m.source)), "ActivateObject (carte de capture)");
+    check_hr(chosen.activate->ActivateObject(IID_PPV_ARGS(&m.source)), "ActivateObject (carte de capture)");
 
     UINT token = 0;
     check_hr(MFCreateDXGIDeviceManager(&token, &m.devmgr), "MFCreateDXGIDeviceManager");
@@ -378,58 +468,46 @@ bool MfCaptureSource::start_impl(const std::wstring& needle, const std::wstring&
     m.reader->SetStreamSelection(DWORD(MF_SOURCE_READER_FIRST_VIDEO_STREAM), TRUE);
 
     // Choix du mode natif.
-    ComPtr<IMFMediaType> best;
-    double best_score = -1.0;
-    std::string best_desc;
-    std::vector<std::string> all_modes;
-    for (DWORD i = 0;; ++i) {
-        ComPtr<IMFMediaType> t;
-        HRESULT hr = m.reader->GetNativeMediaType(DWORD(MF_SOURCE_READER_FIRST_VIDEO_STREAM), i, &t);
-        if (hr == MF_E_NO_MORE_TYPES || FAILED(hr)) break;
-        GUID   sub{};
-        UINT32 w = 0, h = 0, num = 0, den = 0;
-        t->GetGUID(MF_MT_SUBTYPE, &sub);
-        MFGetAttributeSize(t.Get(), MF_MT_FRAME_SIZE, &w, &h);
-        MFGetAttributeRatio(t.Get(), MF_MT_FRAME_RATE, &num, &den);
-        const double fps = den ? double(num) / double(den) : 0.0;
-        char desc[96];
-        std::snprintf(desc, sizeof(desc), "%ux%u @ %.2f fps, %s", w, h, fps, subtype_name(sub));
-        all_modes.emplace_back(desc);
-
-        double score;
-        if (req_w) {
-            const bool match = w == req_w && h == req_h && (req_fps <= 0.0 || std::abs(fps - req_fps) < 1.0);
-            score = match ? 1.0 + (is_uncompressed(sub) ? 1.0 : 0.0) : -1.0;
-        } else {
-            const double px = double(std::min<uint64_t>(uint64_t(w) * h, 3840ull * 2160ull));
-            score = (fps >= 59.0 ? 1e13 : 0.0) + px * 1e3 + std::min(fps, 144.0) * 10.0 +
-                    (is_uncompressed(sub) ? 5.0 : 0.0);
-        }
-        if (score > best_score) {
-            best_score = score;
-            best       = t;
-            best_desc  = desc;
-        }
-    }
-    log_msg("Carte de capture \"%s\" : %zu modes natifs", narrow(chosen->name).c_str(), all_modes.size());
-    if (!best) {
-        log_msg(req_w ? "Mode demandé introuvable. Modes disponibles :" : "Aucun mode vidéo utilisable. Modes :");
-        for (const auto& d : all_modes) log_msg("  %s", d.c_str());
+    std::vector<ComPtr<IMFMediaType>> types;
+    const auto modes = native_modes(m.reader.Get(), &types);
+    log_msg("Carte de capture \"%s\" : %zu modes natifs", narrow(chosen.name).c_str(), modes.size());
+    for (const auto& md : modes) log_msg("  %s", cl::describe(md).c_str());
+    const int best = cl::choose_mode(modes, req);
+    if (best < 0) {
+        log_msg(req.automatic() ? "Aucun mode vidéo utilisable (voir la liste ci-dessus)."
+                                : "Mode demandé (--mode) introuvable : choisis-en un dans la liste ci-dessus.");
         return false;
     }
-    check_hr(m.reader->SetCurrentMediaType(DWORD(MF_SOURCE_READER_FIRST_VIDEO_STREAM), nullptr, best.Get()),
+    const cl::NativeMode native = modes[size_t(best)];
+    check_hr(m.reader->SetCurrentMediaType(DWORD(MF_SOURCE_READER_FIRST_VIDEO_STREAM), nullptr, types[size_t(best)].Get()),
              "SetCurrentMediaType (natif)");
 
-    ComPtr<IMFMediaType> nv12;
-    check_hr(MFCreateMediaType(&nv12), "MFCreateMediaType");
-    nv12->SetGUID(MF_MT_MAJOR_TYPE, MFMediaType_Video);
-    nv12->SetGUID(MF_MT_SUBTYPE, MFVideoFormat_NV12);
-    check_hr(m.reader->SetCurrentMediaType(DWORD(MF_SOURCE_READER_FIRST_VIDEO_STREAM), nullptr, nv12.Get()),
-             "SetCurrentMediaType (NV12)");
+    // Format de sortie : NV12 (ou RGB32 si natif RGB / NV12 refusé), converti ensuite en BGRA sur le GPU.
+    bool ok = false;
+    for (cl::Output o : cl::output_order(native.subtype)) {
+        ComPtr<IMFMediaType> t;
+        check_hr(MFCreateMediaType(&t), "MFCreateMediaType");
+        t->SetGUID(MF_MT_MAJOR_TYPE, MFMediaType_Video);
+        t->SetGUID(MF_MT_SUBTYPE, o == cl::Output::NV12 ? MFVideoFormat_NV12 : MFVideoFormat_RGB32);
+        const HRESULT hr = m.reader->SetCurrentMediaType(DWORD(MF_SOURCE_READER_FIRST_VIDEO_STREAM), nullptr, t.Get());
+        if (SUCCEEDED(hr)) {
+            m.output = o;
+            ok       = true;
+            break;
+        }
+        log_msg("Carte de capture : sortie %s refusée par le Source Reader (0x%08lX)", cl::output_name(o),
+                static_cast<unsigned long>(hr));
+    }
+    if (!ok) {
+        log_msg("Carte de capture : format natif %s non convertible (ni NV12 ni RGB32) ; essaie un autre --mode.",
+                cl::subtype_name(native.subtype));
+        return false;
+    }
     m.read_format();
 
-    m.label = narrow(chosen->name) + " (" + best_desc + ")";
-    log_msg("Carte de capture : mode choisi %s", best_desc.c_str());
+    const std::string desc = cl::describe(native);
+    m.label = narrow(chosen.name) + " (" + desc + ")";
+    log_msg("Carte de capture : mode choisi %s, sortie %s", desc.c_str(), cl::output_name(m.output));
 
     m.running = true;
     m.thread  = std::thread([this] { impl_->loop(); });
@@ -476,6 +554,7 @@ bool MfCaptureSource::poll_impl(SourceFrame& out) {
     double t = 0.0;
     UINT32 w = 0, h = 0;
     bool   full = false, b601 = false;
+    LONG   stride = 0;
     {
         std::lock_guard lk(m.mu);
         if (!m.latest) return false;
@@ -485,8 +564,15 @@ bool MfCaptureSource::poll_impl(SourceFrame& out) {
         h      = m.height & ~1u;
         full   = m.full_range;
         b601   = m.bt601;
+        stride = m.stride;
     }
     if (w < 64 || h < 64) return false;
+
+    const int b = m.basis;
+    if (b != m.logged_basis) {
+        m.logged_basis = b;
+        log_msg("Carte de capture : horodatage = %s", cl::basis_name(cl::TimestampMapper::Basis(b)));
+    }
 
     ComPtr<IMFMediaBuffer> buf;
     if (FAILED(sample->GetBufferByIndex(0, &buf))) return false;
@@ -501,7 +587,7 @@ bool MfCaptureSource::poll_impl(SourceFrame& out) {
         dx->GetSubresourceIndex(&slice);
         in_tex = gpu_tex.Get();
     } else {
-        if (!m.upload_system_memory(buf.Get(), w, h)) return false;
+        if (!m.upload_system_memory(buf.Get(), w, h, stride)) return false;
         in_tex = m.upload.Get();
     }
     if (!m.logged_path) {
@@ -515,7 +601,7 @@ bool MfCaptureSource::poll_impl(SourceFrame& out) {
     check_hr(m.d3d.video_ctx()->VideoProcessorBlt(m.vp.Get(), m.out_view.Get(), 0, 1, &st), "VideoProcessorBlt (capture)");
 
     out.texture = &m.out;
-    out.time    = t;
+    out.time    = t;  // instant de capture (horloge now_seconds), pas l'instant du poll
     return true;
 }
 

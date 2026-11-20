@@ -1,4 +1,5 @@
 #include "config.hpp"
+#include "capture/capture_logic.hpp"
 
 #include <shellapi.h>
 
@@ -9,10 +10,18 @@ const wchar_t* usage_text() {
                               (défaut : "PS Remote Play" puis "chiaki")
   --list                      liste les fenêtres capturables
 
-  --hdmi                      PS5 branchée sur une carte de capture HDMI
-  --device <txt>              sous-chaîne du nom de la carte (implique --hdmi)
-  --mode <WxH@fps>            mode de capture, ex. 1920x1080@60 (défaut : auto)
-  --list-devices              liste les cartes de capture et les entrées audio
+  Carte de capture HDMI (--source capture, PS5 branchée par câble) :
+  --source capture            lit une carte de capture via Media Foundation
+  --hdmi                      alias de --source capture
+  --device <txt>              sous-chaîne du nom de la carte (implique --source
+                              capture ; défaut : détection Elgato, AVerMedia,
+                              « capture », « HDMI », « USB Video »..., sinon la 1re)
+  --mode <WxH[@fps]>          mode natif, ex. 1920x1080@60 ou 1280x720 (implique
+                              --source capture ; défaut : >= 60 fps, puis la plus
+                              grande résolution <= 4K, puis non compressé)
+  --list-devices              liste les cartes de capture et les entrées audio ;
+                              avec --device ou --source capture : aussi les modes
+                              natifs de la carte choisie
   --audio-device <txt>        entrée audio de la carte (défaut : auto)
   --audio-volume <0..1>       volume du son relayé (défaut : 1)
   --no-audio                  ne relaie pas le son de la carte
@@ -43,18 +52,22 @@ const wchar_t* usage_text() {
   --delay <x>                 marge du retard d'interpolation (défaut : 1.15)
   --flow-scale <0.5..1>       résolution d'estimation du flow (défaut : 1.0) ; la
                               synthèse reste en pleine résolution
-  --no-crop                   ne recadre pas la capture en 16:9
+  --no-crop                   ne recadre pas la capture de fenêtre en 16:9 (wgc ;
+                              la carte de capture n'est jamais recadrée)
   --no-tearing                pas de tearing/VRR sans frame generation
   --no-stats                  démarre avec l'overlay de stats masqué
-  --source wgc|tap            source des frames : capture de fenêtre (wgc, défaut) ou
+  --source wgc|tap|capture    source des frames : capture de fenêtre (wgc, défaut),
                               frame tap (frames décodées NV12/BGRA déposées en mémoire
-                              partagée par un autre programme, format SmoovPlay v2)
+                              partagée par un autre programme, format SmoovPlay v2) ou
+                              carte de capture HDMI (capture, voir plus haut)
   --tap-name <nom>            nom de la mémoire partagée du frame tap
                               (défaut : Local\smoovplay-tap)
   --tap-trust-flags           le pipeline croit les métadonnées du tap : répétition
                               annoncée = doublon sans mesure, frame perdue/tronquée =
                               pas d'interpolation vers ou depuis elle (désactivé par défaut)
-  --test-pattern              source synthétique (pas besoin de PS5)
+  --test-pattern              source synthétique (avec --source capture : profil
+                              « câble », répétitions identiques au pixel, sans gigue ;
+                              pas besoin de PS5)
   --selftest                  mesure qualité/perf de l'interpolation puis quitte
   --selftest-tap              lit des frames du tap (émises par tap_writer), vérifie
                               leur contenu, puis quitte (code 0 si tout passe)
@@ -88,15 +101,15 @@ Config parse_command_line() {
         }
     };
 
-    bool dup_set = false;
+    bool dup_set = false, source_set = false, capture_implied = false;
     for (size_t i = 0; i < a.size(); ++i) {
         const std::wstring& s = a[i];
         if (s == L"--help" || s == L"-h" || s == L"/?") c.help = true;
         else if (s == L"--list") c.list_windows = true;
-        else if (s == L"--hdmi") c.hdmi = true;
+        else if (s == L"--hdmi") { c.source = SourceKind::Capture; source_set = true; }
         else if (s == L"--list-devices") c.list_devices = true;
-        else if (s == L"--device") { c.device = value(i); c.hdmi = true; }
-        else if (s == L"--mode") { c.mode = value(i); c.hdmi = true; }
+        else if (s == L"--device") { c.device = value(i); capture_implied = true; }
+        else if (s == L"--mode") { c.mode = value(i); capture_implied = true; }
         else if (s == L"--no-audio") c.audio = false;
         else if (s == L"--audio-device") c.audio_device = value(i);
         else if (s == L"--audio-volume") c.audio_volume = number(i);
@@ -115,7 +128,9 @@ Config parse_command_line() {
             auto v = to_lower(value(i));
             if (v == L"wgc") c.source = SourceKind::Wgc;
             else if (v == L"tap") c.source = SourceKind::Tap;
-            else throw std::invalid_argument("--source attend wgc ou tap");
+            else if (v == L"capture" || v == L"hdmi") c.source = SourceKind::Capture;
+            else throw std::invalid_argument("--source attend wgc, tap ou capture");
+            source_set = true;
         }
         else if (s == L"--debug") c.debug_layer = true;
         else if (s == L"--warp") c.warp = true;
@@ -158,7 +173,17 @@ Config parse_command_line() {
     }
 
     // HDMI : pas de réencodage, les images répétées sont identiques ; un seuil bas ne rate aucun petit mouvement.
-    if (c.hdmi && !dup_set) c.dup_threshold = 0.4f;
+    if (capture_implied) {
+        if (source_set && c.source != SourceKind::Capture)
+            throw std::invalid_argument("--device et --mode ne servent qu'avec --source capture");
+        c.source = SourceKind::Capture;
+    }
+    {
+        capture_logic::ModeRequest req;
+        std::string                err;
+        if (!capture_logic::parse_mode(narrow(c.mode), req, &err)) throw std::invalid_argument(err);
+    }
+    if (c.capture_source() && !dup_set) c.dup_threshold = 0.4f;
 
     c.audio_volume  = std::clamp(c.audio_volume, 0.0f, 1.0f);
     c.sharpness     = std::clamp(c.sharpness, 0.0f, 1.0f);

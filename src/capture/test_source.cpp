@@ -19,7 +19,7 @@ void TestPattern::render(const GpuTexture& dst, double t, float noise, float see
     comp_->end();
 }
 
-TestSource::TestSource(D3DContext& d3d, Compositor& comp) : d3d_(d3d) {
+TestSource::TestSource(D3DContext& d3d, Compositor& comp, Profile profile) : d3d_(d3d), profile_(profile) {
     pattern_.init(d3d, comp);
     tex_.ensure(d3d.device(), 1920, 1080, DXGI_FORMAT_B8G8R8A8_UNORM,
                 D3D11_BIND_SHADER_RESOURCE | D3D11_BIND_RENDER_TARGET, "test source");
@@ -32,12 +32,20 @@ bool TestSource::poll(SourceFrame& out) {
 
     // Instant de jeu quantifié à 30 fps : la frame 2k+1 répète la frame 2k.
     const double game_time = std::floor(double(n_) / 2.0) / 30.0;
-    pattern_.render(tex_, game_time, 0.012f, float(n_ % 1000), 1.0f);
+    const bool   cable     = profile_ == Profile::Cable;
+    if (cable && now - (start_ + double(n_) / 60.0) > 0.1) start_ = now - double(n_) / 60.0;  // gros retard : recalage
+    // Câble : pas de bruit (le shader n'en ajoute pas à 0), donc répétitions identiques au pixel ; horodatage =
+    // instant nominal de la trame HDMI (comme un horodatage de carte), l'arrivée réelle reste mesurée à part.
+    pattern_.render(tex_, game_time, cable ? 0.0f : 0.012f, float(n_ % 1000), 1.0f);
     out.texture = &tex_;
-    out.time    = now;
+    out.time    = cable ? std::min(now, start_ + double(n_) / 60.0) : now;
 
     ++n_;
-    std::uniform_real_distribution<double> jitter(-0.002, 0.002);
-    next_ = std::max(now, start_ + double(n_) / 60.0 + jitter(rng_));
+    if (cable) {
+        next_ = std::max(now, start_ + double(n_) / 60.0);
+    } else {
+        std::uniform_real_distribution<double> jitter(-0.002, 0.002);
+        next_ = std::max(now, start_ + double(n_) / 60.0 + jitter(rng_));
+    }
     return true;
 }

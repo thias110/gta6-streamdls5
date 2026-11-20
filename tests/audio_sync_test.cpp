@@ -1,8 +1,10 @@
 // Tests du relais audio entre deux horloges (logique pure, sans Windows ni carte) : rééchantillonneur
-// linéaire, asservissement de la dérive, et simulation d'un relais complet carte -> sortie avec des quartz qui
-// dérivent (±300 ppm), des changements du retard voulu et une coupure de l'entrée.
+// linéaire, asservissement de la dérive, simulation d'un relais complet carte -> sortie avec des quartz qui
+// dérivent (±300 ppm), des changements du retard voulu et une coupure de l'entrée ; formats (décodage,
+// downmix, encodage, formats de sortie essayés).
 // Compilation autonome : g++ -std=c++20 -Isrc tests/audio_sync_test.cpp src/capture/audio_sync.cpp
-//                        src/capture/audio_delay.cpp
+//                        src/capture/audio_delay.cpp src/capture/audio_format.cpp
+#include "capture/audio_format.hpp"
 #include "capture/audio_sync.hpp"
 
 #include <algorithm>
@@ -246,6 +248,90 @@ int main() {
         expect(w4 == 960 && s4 > 0 && s4 < 960 && out[s4 - 1] == 0.0f && out[w4 - 1] > 0.2f,
                "déficit : reste du silence, puis le son reprend", double(s4));
     }
+    // --- Formats -------------------------------------------------------------------------------------------
+    {
+        namespace af = audio_format;
+        const auto id = af::mix_matrix(2, 0, 2);
+        expect(af::is_identity(id, 2, 2), "format : stéréo -> stéréo = identité", 0);
+        const auto up = af::mix_matrix(1, 0, 2);
+        expect(up[0] == 1.0f && up[1] == 1.0f, "format : mono -> stéréo recopié", 0);
+        // 5.1 (FL FR FC LFE BL BR) -> stéréo
+        const auto dm = af::mix_matrix(6, 0, 2);
+        float      sumL = 0.0f, sumR = 0.0f;
+        for (int c = 0; c < 6; ++c) sumL += dm[size_t(c)], sumR += dm[size_t(6 + c)];
+        expect(dm[3] == 0.0f && dm[9] == 0.0f, "format : 5.1 -> stéréo, LFE ignoré", 0);
+        expect(dm[1] == 0.0f && dm[6] == 0.0f && dm[0] > dm[2] && dm[2] == dm[8], "format : 5.1 -> stéréo, G/D séparés, centre partagé", dm[2]);
+        expect(std::abs(sumL - 1.0f) < 1e-5f && std::abs(sumR - 1.0f) < 1e-5f, "format : 5.1 -> stéréo normalisé (pas d'écrêtage)", sumL);
+        // 7.1 masque explicite -> stéréo
+        const uint32_t m71 = 0x1 | 0x2 | 0x4 | 0x8 | 0x10 | 0x20 | 0x200 | 0x400;
+        const auto     d7  = af::mix_matrix(8, m71, 2);
+        expect(d7[6] > 0.0f && d7[8 + 6] == 0.0f && d7[8 + 7] > 0.0f, "format : 7.1 -> stéréo, latéraux du bon côté", d7[6]);
+        const auto mono = af::mix_matrix(6, 0, 1);
+        expect(std::abs(mono[0] - 0.2f) < 1e-6f && mono[3] == 0.0f, "format : 5.1 -> mono = moyenne hors LFE", mono[0]);
+
+        // Décodage int16 5.1 -> stéréo float
+        int16_t            pcm[12] = {16384, 0, 0, 32767, 0, 0, /**/ 0, -16384, 0, 0, 0, 0};
+        float              outf[4];
+        std::vector<float> scratch;
+        af::Pcm            in{48000, 6, af::Sample::Int16, 0};
+        af::to_float(reinterpret_cast<const uint8_t*>(pcm), 2, in, 2, dm, outf, scratch);
+        expect(std::abs(outf[0] - 0.5f * dm[0]) < 1e-5f && outf[1] == 0.0f && std::abs(outf[3] + 0.5f * dm[7]) < 1e-5f,
+               "format : décodage int16 + downmix", outf[0]);
+        // int24 et int32 -> float -> int16 / int24 / float (aller-retour)
+        uint8_t i24[6] = {0x00, 0x00, 0x40, 0x00, 0x00, 0xC0};  // +0.5, -0.5
+        af::to_float(i24, 1, {48000, 2, af::Sample::Int24, 0}, 2, af::mix_matrix(2, 0, 2), outf, scratch);
+        expect(outf[0] == 0.5f && outf[1] == -0.5f, "format : décodage int24", outf[0]);
+        int32_t i32[2] = {int32_t(0x40000000), int32_t(0xC0000000)};
+        af::to_float(reinterpret_cast<const uint8_t*>(i32), 1, {48000, 2, af::Sample::Int32, 0}, 2,
+                     af::mix_matrix(2, 0, 2), outf, scratch);
+        expect(outf[0] == 0.5f && outf[1] == -0.5f, "format : décodage int32", outf[0]);
+        const float src[4] = {1.5f, -2.0f, 0.5f, -0.25f};
+        int16_t     o16[4];
+        af::from_float(src, 2, {48000, 2, af::Sample::Int16, 0}, reinterpret_cast<uint8_t*>(o16));
+        expect(o16[0] == 32767 && o16[1] == -32767 && o16[2] == 16384 && o16[3] == -8192, "format : encodage int16 écrêté", o16[0]);
+        uint8_t o24[12];
+        af::from_float(src, 2, {48000, 2, af::Sample::Int24, 0}, o24);
+        float back[4];
+        af::to_float(o24, 2, {48000, 2, af::Sample::Int24, 0}, 2, af::mix_matrix(2, 0, 2), back, scratch);
+        expect(std::abs(back[2] - 0.5f) < 1e-6f && std::abs(back[0] - 1.0f) < 1e-6f, "format : aller-retour int24", back[2]);
+
+        // Formats de sortie essayés
+        const af::Pcm f2{48000, 2, af::Sample::Float32, 0x3}, f6{48000, 6, af::Sample::Int16, 0x3F},
+            mix2{44100, 2, af::Sample::Float32, 0x3}, mix6{48000, 6, af::Sample::Float32, 0x3F};
+        auto c = af::output_candidates(f2, mix2);
+        expect(c.size() == 3 && c[0].fmt.sample == af::Sample::Float32 && c[0].fmt.channels == 2 && c[0].autoconvert &&
+                   c[1].fmt.sample == af::Sample::Int16 && !c[2].autoconvert && c[2].fmt.rate == 44100,
+               "sortie : stéréo float, int16, puis format de mixage exact", double(c.size()));
+        c = af::output_candidates(f6, mix2);
+        bool stereo_only = !c.empty();
+        for (const auto& x : c) stereo_only &= x.fmt.channels == 2;
+        expect(stereo_only && c[0].fmt.sample == af::Sample::Float32, "sortie : 5.1 vers sortie stéréo -> downmix stéréo",
+               double(c.size()));
+        c = af::output_candidates(f6, mix6);
+        expect(c[0].fmt.channels == 6 && c[0].fmt.mask == 0x3F && c[2].fmt.channels == 2,
+               "sortie : 5.1 vers sortie 5.1 -> 5.1 d'abord, stéréo en repli", double(c.size()));
+        c = af::output_candidates(f2, af::Pcm{});
+        expect(c.size() == 2, "sortie : format de mixage inconnu -> pas de candidat exact", double(c.size()));
+    }
+    {  // Rééchantillonnage 44,1 kHz -> 48 kHz (format de mixage exact) : la file reste stable
+        PumpConfig cfg;
+        cfg.channels = 1;
+        cfg.in_rate  = 44100;
+        Pump               p(cfg);
+        std::vector<float> in(441, 0.5f), out(2880);
+        uint32_t           padding = 960;
+        uint64_t           total   = 0;
+        for (int i = 0; i < 3000; ++i) {  // 30 s : paquets de 10 ms des deux côtés
+            p.push(in.data(), 441);
+            padding = padding > 480 ? padding - 480 : 0;
+            const uint32_t w = p.pull(out.data(), 2880 - padding, padding, 0.0f, i * 0.01);
+            padding += w;
+            total += w;
+        }
+        expect(p.dropped() == 0 && p.reprimes() == 0 && std::abs(double(total) - 3000.0 * 480) < 2000.0,
+               "44,1 -> 48 kHz : débit de sortie = 48 kHz, rien de jeté", double(total));
+    }
+
     std::printf(g_failures ? "%d ÉCHEC(S)\n" : "TOUT OK\n", g_failures);
     return g_failures ? 1 : 0;
 }

@@ -49,6 +49,7 @@ add_executable(rpenhance WIN32
     src/capture/mf_capture.cpp
     src/capture/audio_delay.cpp
     src/capture/audio_sync.cpp
+    src/capture/audio_format.cpp
     src/capture/audio_passthrough.cpp
     src/pipeline/compositor.cpp
     src/pipeline/motion.cpp
@@ -144,7 +145,8 @@ add_test(NAME capture_logic COMMAND rpenhance_capture_tests)
 add_executable(rpenhance_audio_delay_tests tests/audio_delay_test.cpp src/capture/audio_delay.cpp)
 target_include_directories(rpenhance_audio_delay_tests PRIVATE src)
 add_test(NAME audio_delay COMMAND rpenhance_audio_delay_tests)
-add_executable(rpenhance_audio_sync_tests tests/audio_sync_test.cpp src/capture/audio_sync.cpp src/capture/audio_delay.cpp)
+add_executable(rpenhance_audio_sync_tests tests/audio_sync_test.cpp src/capture/audio_sync.cpp src/capture/audio_delay.cpp
+               src/capture/audio_format.cpp)
 target_include_directories(rpenhance_audio_sync_tests PRIVATE src)
 add_test(NAME audio_sync COMMAND rpenhance_audio_sync_tests)
 

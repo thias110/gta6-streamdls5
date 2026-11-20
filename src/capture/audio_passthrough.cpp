@@ -1,5 +1,6 @@
 #include "audio_passthrough.hpp"
 #include "audio_delay.hpp"
+#include "audio_format.hpp"
 #include "audio_sync.hpp"
 
 #include <audioclient.h>
@@ -15,6 +16,8 @@
 #include <mmreg.h>
 #include <ks.h>
 #include <ksmedia.h>
+
+namespace af = audio_format;
 
 namespace {
 
@@ -61,66 +64,42 @@ std::vector<std::wstring> words_of(const std::wstring& s) {
     return w;
 }
 
-// Échantillons d'un format PCM / float partagé (WAVE_FORMAT_PCM, IEEE_FLOAT ou EXTENSIBLE).
-struct SampleKind {
-    bool     is_float = false;
-    uint16_t bits     = 0;  // taille du conteneur (16, 24, 32)
-    uint32_t mask     = 0;  // positions des canaux (EXTENSIBLE), 0 = inconnu
-};
-
-bool sample_kind(const WAVEFORMATEX* f, SampleKind& k) {
-    if (!f) return false;
-    k      = {};
-    k.bits = f->wBitsPerSample;
-    if (f->wFormatTag == WAVE_FORMAT_IEEE_FLOAT) k.is_float = true;
-    else if (f->wFormatTag == WAVE_FORMAT_EXTENSIBLE && f->cbSize >= 22) {
+// WAVEFORMATEX (PCM, IEEE_FLOAT ou EXTENSIBLE) -> description pure ; sample = Unknown si non géré.
+af::Pcm pcm_of(const WAVEFORMATEX* f) {
+    af::Pcm p;
+    if (!f) return p;
+    p.rate        = f->nSamplesPerSec;
+    p.channels    = f->nChannels;
+    bool is_float = f->wFormatTag == WAVE_FORMAT_IEEE_FLOAT;
+    bool known    = is_float || f->wFormatTag == WAVE_FORMAT_PCM;
+    if (f->wFormatTag == WAVE_FORMAT_EXTENSIBLE && f->cbSize >= 22) {
         const auto* x = reinterpret_cast<const WAVEFORMATEXTENSIBLE*>(f);
-        k.mask        = x->dwChannelMask;
-        if (IsEqualGUID(x->SubFormat, KSDATAFORMAT_SUBTYPE_IEEE_FLOAT)) k.is_float = true;
-        else if (!IsEqualGUID(x->SubFormat, KSDATAFORMAT_SUBTYPE_PCM)) return false;
-    } else if (f->wFormatTag != WAVE_FORMAT_PCM) return false;
-    if (k.is_float) return k.bits == 32;
-    return k.bits == 16 || k.bits == 24 || k.bits == 32;
+        p.mask        = x->dwChannelMask;
+        is_float      = IsEqualGUID(x->SubFormat, KSDATAFORMAT_SUBTYPE_IEEE_FLOAT) != 0;
+        known         = is_float || IsEqualGUID(x->SubFormat, KSDATAFORMAT_SUBTYPE_PCM);
+    }
+    if (!known || f->nBlockAlign != f->nChannels * (f->wBitsPerSample / 8)) return p;
+    if (is_float) p.sample = f->wBitsPerSample == 32 ? af::Sample::Float32 : af::Sample::Unknown;
+    else if (f->wBitsPerSample == 16) p.sample = af::Sample::Int16;
+    else if (f->wBitsPerSample == 24) p.sample = af::Sample::Int24;
+    else if (f->wBitsPerSample == 32) p.sample = af::Sample::Int32;  // y compris 24 bits utiles dans 32
+    return p;
 }
 
-// Trames capturées -> float entrelacé (mêmes canaux).
-void to_float(const BYTE* src, UINT32 frames, UINT32 channels, const SampleKind& k, float* dst) {
-    const size_t n = size_t(frames) * channels;
-    if (k.is_float) {
-        std::memcpy(dst, src, n * sizeof(float));
-        return;
-    }
-    for (size_t i = 0; i < n; ++i) {
-        if (k.bits == 16) {
-            int16_t v;
-            std::memcpy(&v, src + i * 2, 2);
-            dst[i] = float(v) * (1.0f / 32768.0f);
-        } else if (k.bits == 24) {
-            const BYTE* p = src + i * 3;
-            const int32_t v = int32_t(uint32_t(p[0]) << 8 | uint32_t(p[1]) << 16 | uint32_t(p[2]) << 24) >> 8;
-            dst[i]          = float(v) * (1.0f / 8388608.0f);
-        } else {
-            int32_t v;
-            std::memcpy(&v, src + i * 4, 4);
-            dst[i] = float(double(v) * (1.0 / 2147483648.0));
-        }
-    }
-}
-
-// Format de sortie : float 32 bits, même fréquence et mêmes canaux que l'entrée (le moteur audio convertit la
-// fréquence vers son format de mixage, AUTOCONVERTPCM).
-WAVEFORMATEXTENSIBLE float_format(UINT32 rate, UINT16 channels, UINT32 mask) {
+WAVEFORMATEXTENSIBLE wave_of(const af::Pcm& p) {
+    const bool           is_float = p.sample == af::Sample::Float32;
+    const WORD           bits     = WORD(af::sample_bytes(p.sample) * 8);
     WAVEFORMATEXTENSIBLE x{};
     x.Format.wFormatTag           = WAVE_FORMAT_EXTENSIBLE;
-    x.Format.nChannels            = channels;
-    x.Format.nSamplesPerSec       = rate;
-    x.Format.wBitsPerSample       = 32;
-    x.Format.nBlockAlign          = WORD(channels * 4);
-    x.Format.nAvgBytesPerSec      = rate * x.Format.nBlockAlign;
+    x.Format.nChannels            = p.channels;
+    x.Format.nSamplesPerSec       = p.rate;
+    x.Format.wBitsPerSample       = bits;
+    x.Format.nBlockAlign          = WORD(p.block());
+    x.Format.nAvgBytesPerSec      = p.rate * p.block();
     x.Format.cbSize               = sizeof(WAVEFORMATEXTENSIBLE) - sizeof(WAVEFORMATEX);
-    x.Samples.wValidBitsPerSample = 32;
-    x.dwChannelMask               = mask ? mask : (channels == 1 ? SPEAKER_FRONT_CENTER : channels == 2 ? KSAUDIO_SPEAKER_STEREO : 0);
-    x.SubFormat                   = KSDATAFORMAT_SUBTYPE_IEEE_FLOAT;
+    x.Samples.wValidBitsPerSample = bits;
+    x.dwChannelMask               = p.mask ? p.mask : af::default_mask(p.channels);
+    x.SubFormat                   = is_float ? KSDATAFORMAT_SUBTYPE_IEEE_FLOAT : KSDATAFORMAT_SUBTYPE_PCM;
     return x;
 }
 
@@ -138,8 +117,9 @@ struct AudioPassthrough::Impl {
     ComPtr<IAudioRenderClient>  render;
     ComPtr<ISimpleAudioVolume>  volume;
     WAVEFORMATEX*               fmt = nullptr;  // format de capture (GetMixFormat de l'entrée)
-    SampleKind                  kind;
-    WAVEFORMATEXTENSIBLE        out_fmt{};      // format écrit en sortie (float)
+    af::Pcm                     in;             // le même, décrit
+    af::Pcm                     out;            // format écrit en sortie (négocié, voir audio_format.hpp)
+    std::vector<float>          matrix;         // mixage des canaux entrée -> sortie
     HANDLE                      event = nullptr;
     UINT32                      out_frames = 0;
 
@@ -187,9 +167,10 @@ bool AudioPassthrough::start(const std::wstring& needle, const std::string& vide
                                       reinterpret_cast<void**>(m.cap_client.GetAddressOf())),
              "IAudioClient (capture)");
     check_hr(m.cap_client->GetMixFormat(&m.fmt), "GetMixFormat");
-    if (!sample_kind(m.fmt, m.kind)) {
-        log_msg("Son : format de l'entrée non géré (tag 0x%04X, %u bits)", unsigned(m.fmt->wFormatTag),
-                unsigned(m.fmt->wBitsPerSample));
+    m.in = pcm_of(m.fmt);
+    if (!m.in.valid()) {
+        log_msg("Son : format de l'entrée non géré (tag 0x%04X, %u bits, %u canaux)", unsigned(m.fmt->wFormatTag),
+                unsigned(m.fmt->wBitsPerSample), unsigned(m.fmt->nChannels));
         impl_.reset();
         return false;
     }
@@ -204,21 +185,47 @@ bool AudioPassthrough::start(const std::wstring& needle, const std::string& vide
              "MMDeviceEnumerator");
     ComPtr<IMMDevice> out_dev;
     check_hr(en->GetDefaultAudioEndpoint(eRender, eConsole, &out_dev), "sortie audio par défaut");
-    check_hr(out_dev->Activate(__uuidof(IAudioClient), CLSCTX_ALL, nullptr,
-                               reinterpret_cast<void**>(m.out_client.GetAddressOf())),
-             "IAudioClient (sortie)");
-    m.out_fmt = float_format(m.fmt->nSamplesPerSec, m.fmt->nChannels, m.kind.mask);
-    check_hr(m.out_client->Initialize(AUDCLNT_SHAREMODE_SHARED,
-                                      AUDCLNT_STREAMFLAGS_AUTOCONVERTPCM | AUDCLNT_STREAMFLAGS_SRC_DEFAULT_QUALITY,
-                                      600000, 0, &m.out_fmt.Format, nullptr),
-             "Initialize (sortie)");
+    // Format de sortie : on n'impose plus le format de l'entrée (un 5.1/7.1 peut être refusé) ; on essaie des
+    // formats simples puis le format de mixage exact de la sortie (audio_format::output_candidates).
+    af::Pcm mix;
+    {
+        ComPtr<IAudioClient> probe;
+        WAVEFORMATEX*        mf = nullptr;
+        if (SUCCEEDED(out_dev->Activate(__uuidof(IAudioClient), CLSCTX_ALL, nullptr,
+                                        reinterpret_cast<void**>(probe.GetAddressOf()))) &&
+            SUCCEEDED(probe->GetMixFormat(&mf))) {
+            mix = pcm_of(mf);
+            if (!mix.valid()) mix.sample = af::Sample::Unknown;
+        }
+        if (mf) CoTaskMemFree(mf);
+    }
+    HRESULT last = E_FAIL;
+    for (const auto& c : af::output_candidates(m.in, mix)) {
+        ComPtr<IAudioClient> client;  // un IAudioClient par essai : Initialize ne se rappelle pas après un échec
+        last = out_dev->Activate(__uuidof(IAudioClient), CLSCTX_ALL, nullptr,
+                                 reinterpret_cast<void**>(client.GetAddressOf()));
+        if (FAILED(last)) break;
+        const WAVEFORMATEXTENSIBLE w     = wave_of(c.fmt);
+        const DWORD                flags = c.autoconvert
+                                               ? AUDCLNT_STREAMFLAGS_AUTOCONVERTPCM | AUDCLNT_STREAMFLAGS_SRC_DEFAULT_QUALITY
+                                               : 0;
+        last = client->Initialize(AUDCLNT_SHAREMODE_SHARED, flags, 600000, 0, &w.Format, nullptr);
+        if (SUCCEEDED(last)) {
+            m.out_client = client;
+            m.out        = c.fmt;
+            break;
+        }
+        log_msg("Son : sortie %s refusée (0x%08lX)", af::describe(c.fmt).c_str(), static_cast<unsigned long>(last));
+    }
+    check_hr(m.out_client ? S_OK : last, "Initialize (sortie) : aucun format accepté");
+    m.matrix = af::mix_matrix(m.in.channels, m.in.mask, m.out.channels);
     check_hr(m.out_client->GetBufferSize(&m.out_frames), "GetBufferSize");
     check_hr(m.out_client->GetService(IID_PPV_ARGS(&m.render)), "IAudioRenderClient");
     if (SUCCEEDED(m.out_client->GetService(IID_PPV_ARGS(&m.volume)))) m.volume->SetMasterVolume(std::clamp(vol, 0.0f, 1.0f), nullptr);
 
     // Silence d'amorçage = remplissage visé du tampon de sortie (évite la famine des premières périodes).
     const UINT32 prime = std::min(m.out_frames, audio_delay::ms_to_frames(audio_sync::PumpConfig{}.out_fill_ms,
-                                                                          m.out_fmt.Format.nSamplesPerSec));
+                                                                          m.out.rate));
     BYTE* dst = nullptr;
     if (SUCCEEDED(m.render->GetBuffer(prime, &dst))) m.render->ReleaseBuffer(prime, AUDCLNT_BUFFERFLAGS_SILENT);
 
@@ -226,8 +233,8 @@ bool AudioPassthrough::start(const std::wstring& needle, const std::string& vide
     check_hr(m.cap_client->Start(), "Start (capture)");
 
     name_ = narrow(chosen->name);
-    log_msg("Son : \"%s\" -> sortie par défaut (%lu Hz, %u canaux)", name_.c_str(), m.fmt->nSamplesPerSec,
-            unsigned(m.fmt->nChannels));
+    log_msg("Son : \"%s\" (%s) -> sortie par défaut (%s)", name_.c_str(), af::describe(m.in).c_str(),
+            af::describe(m.out).c_str());
     running_ = true;
     thread_  = std::thread([this] { loop(); });
     return true;
@@ -240,12 +247,12 @@ void AudioPassthrough::loop() {
     // sont pas les mêmes ; la latence est tenue autour de ~25 ms + le retard voulu (set_delay_ms) sans jeter
     // de paquets en régime normal.
     audio_sync::PumpConfig cfg;
-    cfg.in_rate  = m.fmt->nSamplesPerSec;
-    cfg.out_rate = m.out_fmt.Format.nSamplesPerSec;
-    cfg.channels = m.out_fmt.Format.nChannels;
+    cfg.in_rate  = m.in.rate;
+    cfg.out_rate = m.out.rate;  // diffère de l'entrée seulement avec le format de mixage exact de la sortie
+    cfg.channels = m.out.channels;
     audio_sync::Pump   pump(cfg);
     const UINT32       ch = cfg.channels;
-    std::vector<float> conv, out(size_t(m.out_frames) * ch);
+    std::vector<float> conv, scratch, out(size_t(m.out_frames) * ch);
 
     while (running_) {
         if (WaitForSingleObject(m.event, 100) != WAIT_OBJECT_0) continue;
@@ -259,7 +266,7 @@ void AudioPassthrough::loop() {
                 pump.push(nullptr, frames);
             } else {
                 conv.resize(size_t(frames) * ch);
-                to_float(data, frames, ch, m.kind, conv.data());
+                af::to_float(data, frames, m.in, m.out.channels, m.matrix, conv.data(), scratch);
                 pump.push(conv.data(), frames);
             }
             m.capture->ReleaseBuffer(frames);
@@ -272,7 +279,7 @@ void AudioPassthrough::loop() {
         BYTE*        dst  = nullptr;
         if (!room || FAILED(m.render->GetBuffer(room, &dst))) continue;
         const UINT32 written = pump.pull(out.data(), room, padding, delay_ms_, now_seconds());
-        std::memcpy(dst, out.data(), size_t(written) * ch * sizeof(float));
+        af::from_float(out.data(), written, m.out, dst);
         m.render->ReleaseBuffer(written, 0);
         frames_           = pump.relayed();
         dropped_          = pump.dropped();

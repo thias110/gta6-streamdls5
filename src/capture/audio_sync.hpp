@@ -117,4 +117,9 @@ private:
     uint64_t               relayed_ = 0, dropped_ = 0, silence_ = 0, reprimes_ = 0;
 };
 
+// Réouverture après une erreur du périphérique : 0,5 s, 1 s, 2 s, 4 s puis 5 s entre deux essais ; abandon
+// après kMaxRetries essais ratés d'affilée (~2 min).
+constexpr int kMaxRetries = 30;
+double        retry_delay_s(int attempt);
+
 }  // namespace audio_sync

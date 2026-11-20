@@ -332,6 +332,15 @@ int main() {
                "44,1 -> 48 kHz : débit de sortie = 48 kHz, rien de jeté", double(total));
     }
 
+    {  // Réouverture après erreur du périphérique : temporisation croissante, bornée
+        expect(retry_delay_s(0) == 0.5 && retry_delay_s(1) == 1.0 && retry_delay_s(2) == 2.0 && retry_delay_s(3) == 4.0 &&
+                   retry_delay_s(4) == 5.0 && retry_delay_s(100) == 5.0 && retry_delay_s(-3) == 0.5,
+               "réouverture : 0,5 / 1 / 2 / 4 / 5 s", retry_delay_s(4));
+        double total = 0.0;
+        for (int i = 0; i < kMaxRetries; ++i) total += retry_delay_s(i);
+        expect(total > 60.0 && total < 180.0, "réouverture : abandon après 1 à 3 minutes", total);
+    }
+
     std::printf(g_failures ? "%d ÉCHEC(S)\n" : "TOUT OK\n", g_failures);
     return g_failures ? 1 : 0;
 }

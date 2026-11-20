@@ -124,6 +124,8 @@ struct AudioPassthrough::Impl {
     UINT32                      out_frames = 0;
 
     ~Impl() {
+        if (cap_client) cap_client->Stop();
+        if (out_client) out_client->Stop();
         if (fmt) CoTaskMemFree(fmt);
         if (event) CloseHandle(event);
     }
@@ -134,12 +136,28 @@ AudioPassthrough::~AudioPassthrough() { stop(); }
 
 bool AudioPassthrough::start(const std::wstring& needle, const std::string& video_device_name, float vol) {
     stop();
+    needle_     = needle;
+    video_name_ = video_device_name;
+    volume_     = std::clamp(vol, 0.0f, 1.0f);
+    if (!open(true)) return false;
+    name_    = impl_name_;
+    running_ = true;
+    thread_  = std::thread([this] { loop(); });
+    return true;
+}
+
+// Choisit l'entrée, négocie les formats et démarre les deux flux (impl_). false si aucune entrée ne
+// correspond ; lève en cas d'échec WASAPI. Appelée par start() puis par le thread du relais (réouverture).
+bool AudioPassthrough::open(bool verbose) {
+    impl_.reset();
+    const std::wstring& needle = needle_;
     auto endpoints = capture_endpoints();
     const Endpoint* chosen = nullptr;
     if (!needle.empty()) {
         for (auto& e : endpoints)
             if (to_lower(e.name).find(to_lower(needle)) != std::wstring::npos) { chosen = &e; break; }
     } else {
+        const std::string& video_device_name = video_name_;
         // 1) une entrée qui partage un mot avec le nom de la carte vidéo ; 2) un nom typique de carte.
         for (auto& word : words_of(widen(video_device_name))) {
             for (auto& e : endpoints)
@@ -155,7 +173,7 @@ bool AudioPassthrough::start(const std::wstring& needle, const std::string& vide
         }
     }
     if (!chosen) {
-        log_msg("Son : aucune entrée audio correspondant à la carte (utilise --audio-device, voir --list-devices).");
+        if (verbose) log_msg("Son : aucune entrée audio correspondant à la carte (utilise --audio-device, voir --list-devices).");
         return false;
     }
 
@@ -221,7 +239,8 @@ bool AudioPassthrough::start(const std::wstring& needle, const std::string& vide
     m.matrix = af::mix_matrix(m.in.channels, m.in.mask, m.out.channels);
     check_hr(m.out_client->GetBufferSize(&m.out_frames), "GetBufferSize");
     check_hr(m.out_client->GetService(IID_PPV_ARGS(&m.render)), "IAudioRenderClient");
-    if (SUCCEEDED(m.out_client->GetService(IID_PPV_ARGS(&m.volume)))) m.volume->SetMasterVolume(std::clamp(vol, 0.0f, 1.0f), nullptr);
+    if (SUCCEEDED(m.out_client->GetService(IID_PPV_ARGS(&m.volume)))) m.volume->SetMasterVolume(volume_, nullptr);
+    volume_dirty_ = false;
 
     // Silence d'amorçage = remplissage visé du tampon de sortie (évite la famine des premières périodes).
     const UINT32 prime = std::min(m.out_frames, audio_delay::ms_to_frames(audio_sync::PumpConfig{}.out_fill_ms,
@@ -232,17 +251,16 @@ bool AudioPassthrough::start(const std::wstring& needle, const std::string& vide
     check_hr(m.out_client->Start(), "Start (sortie)");
     check_hr(m.cap_client->Start(), "Start (capture)");
 
-    name_ = narrow(chosen->name);
-    log_msg("Son : \"%s\" (%s) -> sortie par défaut (%s)", name_.c_str(), af::describe(m.in).c_str(),
+    impl_name_ = narrow(chosen->name);
+    log_msg("Son : \"%s\" (%s) -> sortie par défaut (%s)", impl_name_.c_str(), af::describe(m.in).c_str(),
             af::describe(m.out).c_str());
-    running_ = true;
-    thread_  = std::thread([this] { loop(); });
     return true;
 }
 
-void AudioPassthrough::loop() {
-    const HRESULT co = CoInitializeEx(nullptr, COINIT_MULTITHREADED);
-    auto&         m  = *impl_;
+// Relais tant que tout va bien ; renvoie le HRESULT de la première erreur (périphérique débranché ou invalidé :
+// AUDCLNT_E_DEVICE_INVALIDATED, changement de sortie par défaut...), S_OK si arrêt demandé.
+HRESULT AudioPassthrough::relay() {
+    auto& m = *impl_;
     // File intermédiaire + rééchantillonnage asservi (audio_sync.hpp) : les deux horloges (carte, sortie) ne
     // sont pas les mêmes ; la latence est tenue autour de ~25 ms + le retard voulu (set_delay_ms) sans jeter
     // de paquets en régime normal.
@@ -253,15 +271,34 @@ void AudioPassthrough::loop() {
     audio_sync::Pump   pump(cfg);
     const UINT32       ch = cfg.channels;
     std::vector<float> conv, scratch, out(size_t(m.out_frames) * ch);
+    const uint64_t     base_frames = frames_, base_dropped = dropped_;
+    int                idle        = 0;  // attentes sans paquet (100 ms chacune)
 
     while (running_) {
-        if (WaitForSingleObject(m.event, 100) != WAIT_OBJECT_0) continue;
-        UINT32 packet = 0;
-        while (running_ && SUCCEEDED(m.capture->GetNextPacketSize(&packet)) && packet > 0) {
+        if (volume_dirty_.exchange(false) && m.volume) m.volume->SetMasterVolume(volume_, nullptr);
+        if (WaitForSingleObject(m.event, 100) != WAIT_OBJECT_0) {
+            // Plus d'événement : entrée silencieuse ou périphérique mort ; on sonde toutes les ~2 s.
+            UINT32 probe = 0;
+            if (++idle >= 20) {
+                idle = 0;
+                UINT32 pad = 0;
+                if (const HRESULT hr = m.capture->GetNextPacketSize(&probe); FAILED(hr)) return hr;
+                if (const HRESULT hr = m.out_client->GetCurrentPadding(&pad); FAILED(hr)) return hr;
+            }
+            continue;
+        }
+        idle = 0;
+        for (;;) {
+            UINT32  packet = 0;
+            HRESULT hr     = m.capture->GetNextPacketSize(&packet);
+            if (FAILED(hr)) return hr;
+            if (!packet || !running_) break;
             BYTE*  data   = nullptr;
             UINT32 frames = 0;
             DWORD  flags  = 0;
-            if (FAILED(m.capture->GetBuffer(&data, &frames, &flags, nullptr, nullptr))) break;
+            hr            = m.capture->GetBuffer(&data, &frames, &flags, nullptr, nullptr);
+            if (hr == AUDCLNT_S_BUFFER_EMPTY) break;
+            if (FAILED(hr)) return hr;
             if (flags & AUDCLNT_BUFFERFLAGS_SILENT) {
                 pump.push(nullptr, frames);
             } else {
@@ -269,23 +306,69 @@ void AudioPassthrough::loop() {
                 af::to_float(data, frames, m.in, m.out.channels, m.matrix, conv.data(), scratch);
                 pump.push(conv.data(), frames);
             }
-            m.capture->ReleaseBuffer(frames);
+            if (FAILED(hr = m.capture->ReleaseBuffer(frames))) return hr;
         }
 
         UINT32 padding = 0;
-        if (FAILED(m.out_client->GetCurrentPadding(&padding))) continue;
+        if (const HRESULT hr = m.out_client->GetCurrentPadding(&padding); FAILED(hr)) return hr;
         const UINT32 room = m.out_frames > padding ? m.out_frames - padding : 0;
+        if (!room) continue;
         // Tampon de sortie réservé AVANT de tirer de la file : si GetBuffer échoue, rien n'est consommé ni compté.
-        BYTE*        dst  = nullptr;
-        if (!room || FAILED(m.render->GetBuffer(room, &dst))) continue;
+        BYTE* dst = nullptr;
+        if (const HRESULT hr = m.render->GetBuffer(room, &dst); FAILED(hr)) return hr;
         const UINT32 written = pump.pull(out.data(), room, padding, delay_ms_, now_seconds());
         af::from_float(out.data(), written, m.out, dst);
-        m.render->ReleaseBuffer(written, 0);
-        frames_           = pump.relayed();
-        dropped_          = pump.dropped();
+        if (const HRESULT hr = m.render->ReleaseBuffer(written, 0); FAILED(hr)) return hr;
+
+        frames_           = base_frames + pump.relayed();
+        dropped_          = base_dropped + pump.dropped();
         drift_ppm_        = float(pump.ppm());
         buffered_ms_      = float(padding + written) * 1000.0f / float(cfg.out_rate);
         applied_delay_ms_ = float(pump.queued()) * 1000.0f / float(cfg.in_rate);
+    }
+    return S_OK;
+}
+
+void AudioPassthrough::loop() {
+    const HRESULT co = CoInitializeEx(nullptr, COINIT_MULTITHREADED);
+    // Attente interruptible par stop().
+    auto sleep_s = [this](double s) {
+        for (double t = 0.0; running_ && t < s; t += 0.05) Sleep(50);
+    };
+    int attempt = 0;
+    while (running_) {
+        if (!impl_) {
+            sleep_s(audio_sync::retry_delay_s(attempt));
+            if (!running_) break;
+            std::string why;
+            try {
+                if (open(false)) {
+                    log_msg("Son : relais rétabli après %d tentative(s)", attempt + 1);
+                    attempt = 0;
+                    continue;
+                }
+                why = "entrée introuvable";
+            } catch (const std::exception& e) {
+                why = e.what();
+            }
+            impl_.reset();
+            if (++attempt >= audio_sync::kMaxRetries) {
+                log_msg("Son : relais abandonné après %d tentatives (%s) ; l'image continue sans le son.", attempt,
+                        why.c_str());
+                running_ = false;
+                break;
+            }
+            if (attempt == 1) log_msg("Son : réouverture impossible (%s) ; nouvelles tentatives en arrière-plan.", why.c_str());
+            continue;
+        }
+        const HRESULT hr = relay();
+        if (!running_) break;
+        // Erreur journalisée une fois par incident ; flux fermés ; réouverture avec temporisation.
+        log_msg("Son : périphérique audio perdu ou en erreur (0x%08lX%s) ; tentative de réouverture.",
+                static_cast<unsigned long>(hr), hr == AUDCLNT_E_DEVICE_INVALIDATED ? ", AUDCLNT_E_DEVICE_INVALIDATED" : "");
+        impl_.reset();
+        buffered_ms_ = 0.0f;
+        attempt      = 0;
     }
     if (SUCCEEDED(co)) CoUninitialize();
 }
@@ -293,15 +376,12 @@ void AudioPassthrough::loop() {
 void AudioPassthrough::stop() {
     running_ = false;
     if (thread_.joinable()) thread_.join();
-    if (impl_) {
-        if (impl_->cap_client) impl_->cap_client->Stop();
-        if (impl_->out_client) impl_->out_client->Stop();
-        impl_.reset();
-    }
+    impl_.reset();  // ~Impl arrête les flux
 }
 
 void AudioPassthrough::set_volume(float v) {
-    if (impl_ && impl_->volume) impl_->volume->SetMasterVolume(std::clamp(v, 0.0f, 1.0f), nullptr);
+    volume_       = std::clamp(v, 0.0f, 1.0f);
+    volume_dirty_ = true;  // appliqué par le thread du relais (seul à toucher aux objets WASAPI)
 }
 
 std::string AudioPassthrough::name() const { return name_; }

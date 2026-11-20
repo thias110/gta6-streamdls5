@@ -175,4 +175,9 @@ uint32_t Pump::pull(float* out, uint32_t room, uint32_t padding, float delay_ms,
     return written;
 }
 
+double retry_delay_s(int attempt) {
+    if (attempt <= 0) return 0.5;
+    return attempt >= 4 ? 5.0 : std::min(5.0, 0.5 * double(1 << attempt));
+}
+
 }  // namespace audio_sync

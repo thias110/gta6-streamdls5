@@ -151,9 +151,10 @@ void D3DContext::draw_fullscreen() const {
 }
 
 void D3DContext::unbind_cs() const {
-    ID3D11ShaderResourceView*  srv[4]{};
-    ID3D11UnorderedAccessView* uav[1]{};
-    ctx_->CSSetShaderResources(0, 4, srv);
-    ctx_->CSSetUnorderedAccessViews(0, 1, uav, nullptr);
+    // 6 SRV / 2 UAV : les noyaux de flow traitent les deux sens d'une paire dans un même Dispatch.
+    ID3D11ShaderResourceView*  srv[6]{};
+    ID3D11UnorderedAccessView* uav[2]{};
+    ctx_->CSSetShaderResources(0, 6, srv);
+    ctx_->CSSetUnorderedAccessViews(0, 2, uav, nullptr);
     ctx_->CSSetShader(nullptr, nullptr, 0);
 }

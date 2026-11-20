@@ -154,8 +154,7 @@ int run_selftest(const Config& cfg) {
                 speed, same_f.corr, same_f.hist, same_cut ? "coupure" : "même plan", cut_ok ? "OK" : "ÉCHEC",
                 far_f.corr, far_f.hist, far_cut ? "coupure" : "même plan");
 
-        me.estimate_flow(pa, pb, nullptr, 1.0f, fab);
-        me.estimate_flow(pb, pa, nullptr, 1.0f, fba);
+        me.estimate_flow_pair(pa, pb, nullptr, 1.0f, fab, nullptr, 1.0f, fba);
         me.build_edges(pa, ea);
         me.build_edges(pb, eb);
 
@@ -192,8 +191,7 @@ int run_selftest(const Config& cfg) {
             GpuTexture  hfab, hfba, hea, heb;
             me.build_pyramid(ha, A.srv.Get(), cap, 0.5f);
             me.build_pyramid(hb, B.srv.Get(), cap, 0.5f);
-            me.estimate_flow(ha, hb, nullptr, 1.0f, hfab);
-            me.estimate_flow(hb, ha, nullptr, 1.0f, hfba);
+            me.estimate_flow_pair(ha, hb, nullptr, 1.0f, hfab, nullptr, 1.0f, hfba);
             me.build_edges(ha, hea);
             me.build_edges(hb, heb);
             comp.begin(Syn.rtv.Get(), vp);
@@ -232,8 +230,9 @@ int run_selftest(const Config& cfg) {
         me.build_pyramid(pb, B.srv.Get(), cap);
         prof.end(ctx, GpuSection::Analyze);
         prof.begin(ctx, GpuSection::Flow);
-        me.estimate_flow(pa, pb, fab.srv.Get(), 1.0f, fab);
-        me.estimate_flow(pb, pa, fab.srv.Get(), -1.0f, fba);
+        // Les deux sens dans les mêmes Dispatch (comme le pipeline). Le prédicteur du retour est le fab de
+        // l'itération précédente (avant : celui qu'on venait d'écrire) ; entrées fixes, donc équivalent.
+        me.estimate_flow_pair(pa, pb, fab.srv.Get(), 1.0f, fab, fab.srv.Get(), -1.0f, fba);
         prof.end(ctx, GpuSection::Flow);
         prof.begin(ctx, GpuSection::Compose);
         comp.begin(Syn.rtv.Get(), vp);

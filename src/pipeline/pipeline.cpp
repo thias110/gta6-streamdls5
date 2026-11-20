@@ -187,8 +187,8 @@ bool Pipeline::accept(const GpuTexture& src, double time, double arrival, Unique
             // Prédicteurs temporels : flow de même sens de la paire précédente (mouvement ~constant).
             ID3D11ShaderResourceView* t_fwd = last->has_flow ? last->flow_fwd.srv.Get() : nullptr;
             ID3D11ShaderResourceView* t_bwd = last->has_flow ? last->flow_bwd.srv.Get() : nullptr;
-            motion_.estimate_flow(last->pyr, slot.pyr, t_fwd, 1.0f, slot.flow_fwd);
-            motion_.estimate_flow(slot.pyr, last->pyr, t_bwd, 1.0f, slot.flow_bwd);
+            // Aller (last -> slot) et retour (slot -> last) dans les mêmes Dispatch (z = 2).
+            motion_.estimate_flow_pair(last->pyr, slot.pyr, t_fwd, 1.0f, slot.flow_fwd, t_bwd, 1.0f, slot.flow_bwd);
             prof_.end(ctx, GpuSection::Flow);
             slot.has_flow = true;
         }

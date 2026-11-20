@@ -297,12 +297,20 @@ void cs_edge_dilate(uint3 id : SV_DispatchThreadID) {
 // ---------------------------------------------------------------------------------------------
 // Estimation de mouvement par blocs 8x8, grossier -> fin.
 // Flow en UV normalisés : X(p) ~ Y(p + flow).
+// Les deux sens d'une paire partagent chaque Dispatch (SV_DispatchThreadID.z) :
+//   z = 0 : X = g_ma, Y = g_mb, prédicteurs g_coarse / g_temporal, sortie g_flow_out  (A -> B)
+//   z = 1 : X = g_mb, Y = g_ma, prédicteurs g_coarse1 / g_temporal1, sortie g_flow_out1 (B -> A)
+// z est uniforme dans un groupe (numthreads z = 1) : les branches sur z ne divergent pas.
+// Un Dispatch de profondeur 1 ne calcule que le sens 0.
 inline constexpr char kMotion[] = R"HLSL(
-Texture2D<float>    g_mx       : register(t0);
-Texture2D<float>    g_my       : register(t1);
-Texture2D<float2>   g_coarse   : register(t2);
-Texture2D<float2>   g_temporal : register(t3);
-RWTexture2D<float2> g_flow_out : register(u0);
+Texture2D<float>    g_ma        : register(t0);
+Texture2D<float>    g_mb        : register(t1);
+Texture2D<float2>   g_coarse    : register(t2);
+Texture2D<float2>   g_temporal  : register(t3);
+Texture2D<float2>   g_coarse1   : register(t4);
+Texture2D<float2>   g_temporal1 : register(t5);
+RWTexture2D<float2> g_flow_out  : register(u0);
+RWTexture2D<float2> g_flow_out1 : register(u1);
 
 cbuffer MotionCB : register(b0) {
     int2   g_msize;
@@ -310,10 +318,10 @@ cbuffer MotionCB : register(b0) {
     float2 g_inv_msize;
     int    g_radius;
     uint   g_flags;
-    float  g_temporal_sign;
+    float  g_temporal_sign;   // sens 0
     float  g_lambda;
     float  g_zero_bias;
-    float  g_mpad;
+    float  g_temporal_sign1;  // sens 1
     // UV image -> UV de grille : la grille compte div_up(taille, 8) blocs, donc couvre un peu plus
     // que l'image quand la taille n'est pas multiple de 8 (scale = taille / (grille * 8)).
     float2 g_coarse_scale;    // pour g_coarse (niveau L+1)
@@ -321,9 +329,10 @@ cbuffer MotionCB : register(b0) {
 };
 
 #define BS 8
-#define FLAG_COARSE   1u
-#define FLAG_TEMPORAL 2u
-#define FLAG_SUBPIXEL 4u
+#define FLAG_COARSE    1u
+#define FLAG_TEMPORAL  2u   // prédicteur temporel du sens 0
+#define FLAG_SUBPIXEL  4u
+#define FLAG_TEMPORAL1 8u   // prédicteur temporel du sens 1
 
 // SAD d'un bloc 8x8 : 16 GatherRed par image (2x2 texels chacun) au lieu de 64 Load.
 // Gather au coin commun des texels p et p + (1, 1) : uv = (p + 1) / taille, centre exact de
@@ -331,15 +340,15 @@ cbuffer MotionCB : register(b0) {
 // x = (p.x, p.y+1), y = (p.x+1, p.y+1). g_point est en adressage CLAMP : chaque texel hors image est
 // borné comme clamp(p, 0, taille - 1) avec Load. Valeurs exactes (pas de filtrage) et même ordre de
 // sommation (ligne par ligne, de gauche à droite) : résultat identique à la version Load.
-float block_sad(int2 origin, int2 v) {
+float block_sad(Texture2D<float> mx, Texture2D<float> my, int2 origin, int2 v) {
     float s = 0.0;
     [loop] for (int y = 0; y < BS; y += 2) {
         float4 gx[BS / 2];
         float4 gy[BS / 2];
         [unroll] for (int k = 0; k < BS / 2; ++k) {
             int2 c = origin + int2(2 * k + 1, y + 1);
-            gx[k] = g_mx.GatherRed(g_point, float2(c) * g_inv_msize);
-            gy[k] = g_my.GatherRed(g_point, float2(c + v) * g_inv_msize);
+            gx[k] = mx.GatherRed(g_point, float2(c) * g_inv_msize);
+            gy[k] = my.GatherRed(g_point, float2(c + v) * g_inv_msize);
         }
         [unroll] for (int k = 0; k < BS / 2; ++k) {
             s += abs(gx[k].w - gy[k].w);
@@ -353,8 +362,8 @@ float block_sad(int2 origin, int2 v) {
     return s * (1.0 / (BS * BS));
 }
 
-float motion_cost(int2 origin, int2 v, int2 pred) {
-    float c = block_sad(origin, v);
+float motion_cost(Texture2D<float> mx, Texture2D<float> my, int2 origin, int2 v, int2 pred) {
+    float c = block_sad(mx, my, origin, v);
     int2 d = abs(v - pred);
     c += g_lambda * float(d.x + d.y);
     if (v.x == 0 && v.y == 0) c -= g_zero_bias;
@@ -363,10 +372,9 @@ float motion_cost(int2 origin, int2 v, int2 pred) {
 
 int2 to_px(float2 f) { return int2(round(f * float2(g_msize))); }
 
-[numthreads(8, 8, 1)]
-void cs_motion_search(uint3 id : SV_DispatchThreadID) {
-    if (int(id.x) >= g_grid.x || int(id.y) >= g_grid.y) return;
-    int2   origin = int2(id.xy) * BS;
+float2 search_block(Texture2D<float> mx, Texture2D<float> my, Texture2D<float2> coarse, Texture2D<float2> temporal,
+                    bool use_temporal, float temporal_sign, uint2 cell) {
+    int2   origin = int2(cell) * BS;
     float2 cuv    = (float2(origin) + BS * 0.5) * g_inv_msize;
     float2 nstep  = 2.0 * BS * g_inv_msize;  // un bloc du niveau grossier
 
@@ -375,20 +383,20 @@ void cs_motion_search(uint3 id : SV_DispatchThreadID) {
     uint n = 0;
     cands[n++] = int2(0, 0);
     if (g_flags & FLAG_COARSE) {
-        pred = to_px(g_coarse.SampleLevel(g_linear, cuv * g_coarse_scale, 0));
+        pred = to_px(coarse.SampleLevel(g_linear, cuv * g_coarse_scale, 0));
         cands[n++] = pred;
-        cands[n++] = to_px(g_coarse.SampleLevel(g_point, (cuv + float2(nstep.x, 0.0)) * g_coarse_scale, 0));
-        cands[n++] = to_px(g_coarse.SampleLevel(g_point, (cuv - float2(nstep.x, 0.0)) * g_coarse_scale, 0));
-        cands[n++] = to_px(g_coarse.SampleLevel(g_point, (cuv + float2(0.0, nstep.y)) * g_coarse_scale, 0));
-        cands[n++] = to_px(g_coarse.SampleLevel(g_point, (cuv - float2(0.0, nstep.y)) * g_coarse_scale, 0));
+        cands[n++] = to_px(coarse.SampleLevel(g_point, (cuv + float2(nstep.x, 0.0)) * g_coarse_scale, 0));
+        cands[n++] = to_px(coarse.SampleLevel(g_point, (cuv - float2(nstep.x, 0.0)) * g_coarse_scale, 0));
+        cands[n++] = to_px(coarse.SampleLevel(g_point, (cuv + float2(0.0, nstep.y)) * g_coarse_scale, 0));
+        cands[n++] = to_px(coarse.SampleLevel(g_point, (cuv - float2(0.0, nstep.y)) * g_coarse_scale, 0));
     }
-    if (g_flags & FLAG_TEMPORAL)
-        cands[n++] = to_px(g_temporal_sign * g_temporal.SampleLevel(g_linear, cuv * g_temporal_scale, 0));
+    if (use_temporal)
+        cands[n++] = to_px(temporal_sign * temporal.SampleLevel(g_linear, cuv * g_temporal_scale, 0));
 
     float best = 1e9;
     int2  bv   = int2(0, 0);
     [loop] for (uint i = 0; i < n; ++i) {
-        float c = motion_cost(origin, cands[i], pred);
+        float c = motion_cost(mx, my, origin, cands[i], pred);
         if (c < best) { best = c; bv = cands[i]; }
     }
 
@@ -397,21 +405,32 @@ void cs_motion_search(uint3 id : SV_DispatchThreadID) {
         [loop] for (int dx = -g_radius; dx <= g_radius; ++dx) {
             if (dx == 0 && dy == 0) continue;
             int2  v = base + int2(dx, dy);
-            float c = motion_cost(origin, v, pred);
+            float c = motion_cost(mx, my, origin, v, pred);
             if (c < best) { best = c; bv = v; }
         }
     }
 
-    g_flow_out[id.xy] = float2(bv) * g_inv_msize;
+    return float2(bv) * g_inv_msize;
 }
 
-float2 subpixel(int2 origin, int2 bv) {
+[numthreads(8, 8, 1)]
+void cs_motion_search(uint3 id : SV_DispatchThreadID) {
+    if (int(id.x) >= g_grid.x || int(id.y) >= g_grid.y) return;
+    if (id.z == 0)
+        g_flow_out[id.xy] = search_block(g_ma, g_mb, g_coarse, g_temporal, (g_flags & FLAG_TEMPORAL) != 0,
+                                         g_temporal_sign, id.xy);
+    else
+        g_flow_out1[id.xy] = search_block(g_mb, g_ma, g_coarse1, g_temporal1, (g_flags & FLAG_TEMPORAL1) != 0,
+                                          g_temporal_sign1, id.xy);
+}
+
+float2 subpixel(Texture2D<float> mx, Texture2D<float> my, int2 origin, int2 bv) {
     float2 fv = float2(bv);
-    float c0 = block_sad(origin, bv);
-    float cl = block_sad(origin, bv - int2(1, 0));
-    float cr = block_sad(origin, bv + int2(1, 0));
-    float cu = block_sad(origin, bv - int2(0, 1));
-    float cd = block_sad(origin, bv + int2(0, 1));
+    float c0 = block_sad(mx, my, origin, bv);
+    float cl = block_sad(mx, my, origin, bv - int2(1, 0));
+    float cr = block_sad(mx, my, origin, bv + int2(1, 0));
+    float cu = block_sad(mx, my, origin, bv - int2(0, 1));
+    float cd = block_sad(mx, my, origin, bv + int2(0, 1));
     float ddx = cl + cr - 2.0 * c0;
     float ddy = cu + cd - 2.0 * c0;
     if (ddx > 1e-5) fv.x += clamp(0.5 * (cl - cr) / ddx, -0.5, 0.5);
@@ -421,23 +440,21 @@ float2 subpixel(int2 origin, int2 bv) {
 
 // Propagation (façon PatchMatch) : chaque bloc essaie les vecteurs de ses voisins du même niveau.
 // Les bons vecteurs des zones sans ambiguïté envahissent les zones répétitives ou peu texturées.
-// Entrée : g_coarse = flow du même niveau.
+// Entrée : g_coarse (sens 0) / g_coarse1 (sens 1) = flow du même niveau.
 static const int2 kNeighbours[12] = {
     int2(-1, -1), int2(0, -1), int2(1, -1), int2(-1, 0), int2(1, 0), int2(-1, 1),
     int2(0, 1), int2(1, 1), int2(0, -3), int2(0, 3), int2(-3, 0), int2(3, 0)
 };
 
-[numthreads(8, 8, 1)]
-void cs_motion_propagate(uint3 id : SV_DispatchThreadID) {
-    if (int(id.x) >= g_grid.x || int(id.y) >= g_grid.y) return;
-    int2 origin = int2(id.xy) * BS;
+float2 propagate_block(Texture2D<float> mx, Texture2D<float> my, Texture2D<float2> cur, uint2 cell) {
+    int2 origin = int2(cell) * BS;
     int2 hi     = g_grid - 1;
-    int2 self   = to_px(g_coarse.Load(int3(id.xy, 0)));
-    float best  = motion_cost(origin, self, self);
+    int2 self   = to_px(cur.Load(int3(cell, 0)));
+    float best  = motion_cost(mx, my, origin, self, self);
     int2  bv    = self;
     [loop] for (uint i = 0; i < 12; ++i) {
-        int2  v = to_px(g_coarse.Load(int3(clamp(int2(id.xy) + kNeighbours[i], 0, hi), 0)));
-        float c = motion_cost(origin, v, self);
+        int2  v = to_px(cur.Load(int3(clamp(int2(cell) + kNeighbours[i], 0, hi), 0)));
+        float c = motion_cost(mx, my, origin, v, self);
         if (c < best) { best = c; bv = v; }
     }
     int2 base = bv;
@@ -445,19 +462,31 @@ void cs_motion_propagate(uint3 id : SV_DispatchThreadID) {
         [loop] for (int dx = -1; dx <= 1; ++dx) {
             if (dx == 0 && dy == 0) continue;
             int2  v = base + int2(dx, dy);
-            float c = motion_cost(origin, v, self);
+            float c = motion_cost(mx, my, origin, v, self);
             if (c < best) { best = c; bv = v; }
         }
     }
-    float2 fv = (g_flags & FLAG_SUBPIXEL) ? subpixel(origin, bv) : float2(bv);
-    g_flow_out[id.xy] = fv * g_inv_msize;
+    float2 fv = (g_flags & FLAG_SUBPIXEL) ? subpixel(mx, my, origin, bv) : float2(bv);
+    return fv * g_inv_msize;
+}
+
+[numthreads(8, 8, 1)]
+void cs_motion_propagate(uint3 id : SV_DispatchThreadID) {
+    if (int(id.x) >= g_grid.x || int(id.y) >= g_grid.y) return;
+    if (id.z == 0)
+        g_flow_out[id.xy] = propagate_block(g_ma, g_mb, g_coarse, id.xy);
+    else
+        g_flow_out1[id.xy] = propagate_block(g_mb, g_ma, g_coarse1, id.xy);
 }
 )HLSL";
 
 // Médiane 3x3 par composante : supprime les vecteurs aberrants isolés.
+// z = 0 : g_med_in -> g_med_out ; z = 1 : g_med_in1 -> g_med_out1 (les deux sens d'une paire).
 inline constexpr char kMedian[] = R"HLSL(
-Texture2D<float2>   g_med_in  : register(t0);
-RWTexture2D<float2> g_med_out : register(u0);
+Texture2D<float2>   g_med_in   : register(t0);
+Texture2D<float2>   g_med_in1  : register(t1);
+RWTexture2D<float2> g_med_out  : register(u0);
+RWTexture2D<float2> g_med_out1 : register(u1);
 cbuffer MedianCB : register(b0) {
     int2 g_mgrid;
     int2 g_medpad;
@@ -475,22 +504,29 @@ float median9(float v[9]) {
     return v[4];
 }
 
-[numthreads(8, 8, 1)]
-void cs_flow_median(uint3 id : SV_DispatchThreadID) {
-    if (int(id.x) >= g_mgrid.x || int(id.y) >= g_mgrid.y) return;
+float2 median3x3(Texture2D<float2> src, int2 c) {
     float xs[9];
     float ys[9];
     int k = 0;
     [unroll] for (int dy = -1; dy <= 1; ++dy) {
         [unroll] for (int dx = -1; dx <= 1; ++dx) {
-            int2   p = clamp(int2(id.xy) + int2(dx, dy), 0, g_mgrid - 1);
-            float2 f = g_med_in.Load(int3(p, 0));
+            int2   p = clamp(c + int2(dx, dy), 0, g_mgrid - 1);
+            float2 f = src.Load(int3(p, 0));
             xs[k] = f.x;
             ys[k] = f.y;
             ++k;
         }
     }
-    g_med_out[id.xy] = float2(median9(xs), median9(ys));
+    return float2(median9(xs), median9(ys));
+}
+
+[numthreads(8, 8, 1)]
+void cs_flow_median(uint3 id : SV_DispatchThreadID) {
+    if (int(id.x) >= g_mgrid.x || int(id.y) >= g_mgrid.y) return;
+    if (id.z == 0)
+        g_med_out[id.xy] = median3x3(g_med_in, int2(id.xy));
+    else
+        g_med_out1[id.xy] = median3x3(g_med_in1, int2(id.xy));
 }
 )HLSL";
 

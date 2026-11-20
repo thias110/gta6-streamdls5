@@ -63,8 +63,22 @@ public:
     // `temporal` : flow de la paire précédente (prédicteur), multiplié par temporal_sign.
     void estimate_flow(const LumaPyramid& x, const LumaPyramid& y, ID3D11ShaderResourceView* temporal,
                        float temporal_sign, GpuTexture& out);
+    // Les deux sens d'une paire en une seule série de Dispatch (z = 2) : out_ab = flow A -> B,
+    // out_ba = flow B -> A. Même résultat que estimate_flow(a, b, ...) puis estimate_flow(b, a, ...)
+    // tant que les prédicteurs temporels ne sont pas les sorties de cet appel.
+    void estimate_flow_pair(const LumaPyramid& a, const LumaPyramid& b, ID3D11ShaderResourceView* temporal_ab,
+                            float sign_ab, GpuTexture& out_ab, ID3D11ShaderResourceView* temporal_ba, float sign_ba,
+                            GpuTexture& out_ba);
 
 private:
+    struct FlowDir {
+        ID3D11ShaderResourceView* temporal;
+        float                     temporal_sign;
+        GpuTexture*               out;
+    };
+    // ndirs = 1 : sens a -> b seul ; ndirs = 2 : dirs[1] = sens b -> a, dans les mêmes Dispatch.
+    void run_flow(const LumaPyramid& a, const LumaPyramid& b, const FlowDir* dirs, int ndirs);
+
     D3DContext*                         d3d_ = nullptr;
     ComPtr<ID3D11ComputeShader>         cs_luma_rgb_, cs_luma_rgb_scaled_, cs_luma_down_, cs_diff_, cs_cut_, cs_motion_, cs_propagate_,
                                         cs_median_, cs_sobel_, cs_dilate_;
@@ -76,5 +90,5 @@ private:
     bool                                pending_immediate_ = false;  // résultat connu sans GPU (pyramides incompatibles)
     DiffResult                          immediate_;
     uint64_t                            blocking_reads_ = 0;
-    std::vector<GpuTexture>             level_flow_, level_tmp_;
+    std::vector<GpuTexture>             level_flow_[2], level_tmp_[2];  // par sens
 };

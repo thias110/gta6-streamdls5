@@ -227,14 +227,31 @@ DiffResult MotionEngine::measure_difference(const LumaPyramid& a, const LumaPyra
 
 void MotionEngine::estimate_flow(const LumaPyramid& x, const LumaPyramid& y, ID3D11ShaderResourceView* temporal,
                                  float temporal_sign, GpuTexture& out) {
+    const FlowDir d{temporal, temporal_sign, &out};
+    run_flow(x, y, &d, 1);
+}
+
+void MotionEngine::estimate_flow_pair(const LumaPyramid& a, const LumaPyramid& b, ID3D11ShaderResourceView* temporal_ab,
+                                      float sign_ab, GpuTexture& out_ab, ID3D11ShaderResourceView* temporal_ba,
+                                      float sign_ba, GpuTexture& out_ba) {
+    const FlowDir d[2] = {{temporal_ab, sign_ab, &out_ab}, {temporal_ba, sign_ba, &out_ba}};
+    run_flow(a, b, d, 2);
+}
+
+// Sens 0 : X = a, Y = b (t2/t3/u0) ; sens 1 : X = b, Y = a (t4/t5/u1). Chaque Dispatch traite les
+// ndirs sens (SV_DispatchThreadID.z), avec la même logique que l'ancien appel par sens.
+void MotionEngine::run_flow(const LumaPyramid& a, const LumaPyramid& b, const FlowDir* dirs, int ndirs) {
     auto* ctx = d3d_->ctx();
     auto* dev = d3d_->device();
-    const int top = int(x.levels.size()) - 1;
-    if (level_flow_.size() < x.levels.size()) {
-        level_flow_.resize(x.levels.size());
-        level_tmp_.resize(x.levels.size());
+    const int top = int(a.levels.size()) - 1;
+    for (int d = 0; d < ndirs; ++d) {
+        if (level_flow_[d].size() < a.levels.size()) {
+            level_flow_[d].resize(a.levels.size());
+            level_tmp_[d].resize(a.levels.size());
+        }
     }
     d3d_->bind_samplers_cs();
+    const bool two = ndirs > 1;
 
     struct MotionCB {
         int32_t  size[2];
@@ -242,36 +259,40 @@ void MotionEngine::estimate_flow(const LumaPyramid& x, const LumaPyramid& y, ID3
         float    inv[2];
         int32_t  radius;
         uint32_t flags;
-        float    temporal_sign, lambda, zero_bias, pad;
+        float    temporal_sign, lambda, zero_bias, temporal_sign1;
         float    coarse_scale[2];
         float    temporal_scale[2];
     };
     static_assert(sizeof(MotionCB) == 64);
     // Le flow temporel est le niveau 0 de la paire précédente (même taille de capture).
-    const FlowScale ts = flow_grid_scale(x.levels[0].width, x.levels[0].height);
+    const FlowScale ts = flow_grid_scale(a.levels[0].width, a.levels[0].height);
+    const UINT bind = D3D11_BIND_SHADER_RESOURCE | D3D11_BIND_UNORDERED_ACCESS;
 
     for (int L = top; L >= 0; --L) {
-        const GpuTexture& lx = x.levels[size_t(L)];
-        const GpuTexture& ly = y.levels[size_t(L)];
-        const uint32_t gw = div_up(lx.width, kFlowBlock), gh = div_up(lx.height, kFlowBlock);
-        GpuTexture& dst = level_flow_[size_t(L)];
-        dst.ensure(dev, gw, gh, DXGI_FORMAT_R32G32_FLOAT, D3D11_BIND_SHADER_RESOURCE | D3D11_BIND_UNORDERED_ACCESS,
-                   "flow level");
+        // Les deux sens ont des niveaux de même taille (pyramides compatibles) : on prend ceux de a.
+        const GpuTexture& la = a.levels[size_t(L)];
+        const GpuTexture& lb = b.levels[size_t(L)];
+        const uint32_t gw = div_up(la.width, kFlowBlock), gh = div_up(la.height, kFlowBlock);
+        for (int d = 0; d < ndirs; ++d) {
+            level_flow_[d][size_t(L)].ensure(dev, gw, gh, DXGI_FORMAT_R32G32_FLOAT, bind, "flow level");
+            level_tmp_[d][size_t(L)].ensure(dev, gw, gh, DXGI_FORMAT_R32G32_FLOAT, bind, "flow tmp");
+        }
 
         MotionCB cb{};
-        cb.size[0] = int32_t(lx.width);
-        cb.size[1] = int32_t(lx.height);
+        cb.size[0] = int32_t(la.width);
+        cb.size[1] = int32_t(la.height);
         cb.grid[0] = int32_t(gw);
         cb.grid[1] = int32_t(gh);
-        cb.inv[0]  = 1.0f / float(lx.width);
-        cb.inv[1]  = 1.0f / float(lx.height);
+        cb.inv[0]  = 1.0f / float(la.width);
+        cb.inv[1]  = 1.0f / float(la.height);
         cb.radius  = L == top ? 6 : (L == top - 1 ? 3 : 2);
-        cb.flags   = (L < top ? 1u : 0u) | (temporal ? 2u : 0u);
-        cb.temporal_sign = temporal_sign;
-        cb.lambda        = L == top ? 0.0f : 0.0012f;
-        cb.zero_bias     = 0.0025f;
+        cb.flags   = (L < top ? 1u : 0u) | (dirs[0].temporal ? 2u : 0u) | (two && dirs[1].temporal ? 8u : 0u);
+        cb.temporal_sign  = dirs[0].temporal_sign;
+        cb.temporal_sign1 = two ? dirs[1].temporal_sign : 1.0f;
+        cb.lambda         = L == top ? 0.0f : 0.0012f;
+        cb.zero_bias      = 0.0025f;
         if (L < top) {
-            const GpuTexture& lc = x.levels[size_t(L + 1)];
+            const GpuTexture& lc = a.levels[size_t(L + 1)];
             const FlowScale   cs = flow_grid_scale(lc.width, lc.height);
             cb.coarse_scale[0] = cs.x;
             cb.coarse_scale[1] = cs.y;
@@ -281,53 +302,56 @@ void MotionEngine::estimate_flow(const LumaPyramid& x, const LumaPyramid& y, ID3
         cb.temporal_scale[0] = ts.x;
         cb.temporal_scale[1] = ts.y;
 
-        ID3D11Buffer* b = d3d_->constants(cb);
-        ctx->CSSetConstantBuffers(0, 1, &b);
-        ID3D11ShaderResourceView* srvs[4] = {lx.srv.Get(), ly.srv.Get(),
-                                             L < top ? level_flow_[size_t(L + 1)].srv.Get() : nullptr, temporal};
-        ctx->CSSetShaderResources(0, 4, srvs);
-        ID3D11UnorderedAccessView* uav = dst.uav.Get();
-        ctx->CSSetUnorderedAccessViews(0, 1, &uav, nullptr);
+        auto coarse = [&](int d) -> ID3D11ShaderResourceView* {
+            return d < ndirs && L < top ? level_flow_[d][size_t(L + 1)].srv.Get() : nullptr;
+        };
+        ID3D11Buffer* cbuf = d3d_->constants(cb);
+        ctx->CSSetConstantBuffers(0, 1, &cbuf);
+        ID3D11ShaderResourceView* srvs[6] = {la.srv.Get(), lb.srv.Get(), coarse(0), dirs[0].temporal,
+                                             coarse(1), two ? dirs[1].temporal : nullptr};
+        ctx->CSSetShaderResources(0, 6, srvs);
+        ID3D11UnorderedAccessView* uavs[2] = {level_flow_[0][size_t(L)].uav.Get(),
+                                              two ? level_flow_[1][size_t(L)].uav.Get() : nullptr};
+        ctx->CSSetUnorderedAccessViews(0, 2, uavs, nullptr);
         ctx->CSSetShader(cs_motion_.Get(), nullptr, 0);
-        ctx->Dispatch(div_up(gw, 8), div_up(gh, 8), 1);
+        ctx->Dispatch(div_up(gw, 8), div_up(gh, 8), UINT(ndirs));
         d3d_->unbind_cs();
 
         // Propagation entre voisins (ping-pong), sous-pixel à la dernière passe du niveau 0.
-        GpuTexture& tmp = level_tmp_[size_t(L)];
-        tmp.ensure(dev, gw, gh, DXGI_FORMAT_R32G32_FLOAT, D3D11_BIND_SHADER_RESOURCE | D3D11_BIND_UNORDERED_ACCESS,
-                   "flow tmp");
         const int iterations = L == 0 ? 3 : 2;
         for (int it = 0; it < iterations; ++it) {
-            GpuTexture& in  = level_flow_[size_t(L)];
-            MotionCB    pcb = cb;
-            pcb.lambda      = 0.0f;
-            pcb.flags       = (L == 0 && it == iterations - 1) ? 4u : 0u;
+            MotionCB pcb = cb;
+            pcb.lambda   = 0.0f;
+            pcb.flags    = (L == 0 && it == iterations - 1) ? 4u : 0u;
             ID3D11Buffer* pb = d3d_->constants(pcb);
             ctx->CSSetConstantBuffers(0, 1, &pb);
-            ID3D11ShaderResourceView* psrv[3] = {lx.srv.Get(), ly.srv.Get(), in.srv.Get()};
-            ctx->CSSetShaderResources(0, 3, psrv);
-            ID3D11UnorderedAccessView* puav = tmp.uav.Get();
-            ctx->CSSetUnorderedAccessViews(0, 1, &puav, nullptr);
+            ID3D11ShaderResourceView* psrv[6] = {la.srv.Get(), lb.srv.Get(), level_flow_[0][size_t(L)].srv.Get(),
+                                                 nullptr, two ? level_flow_[1][size_t(L)].srv.Get() : nullptr,
+                                                 nullptr};
+            ctx->CSSetShaderResources(0, 6, psrv);
+            ID3D11UnorderedAccessView* puav[2] = {level_tmp_[0][size_t(L)].uav.Get(),
+                                                  two ? level_tmp_[1][size_t(L)].uav.Get() : nullptr};
+            ctx->CSSetUnorderedAccessViews(0, 2, puav, nullptr);
             ctx->CSSetShader(cs_propagate_.Get(), nullptr, 0);
-            ctx->Dispatch(div_up(gw, 8), div_up(gh, 8), 1);
+            ctx->Dispatch(div_up(gw, 8), div_up(gh, 8), UINT(ndirs));
             d3d_->unbind_cs();
-            std::swap(level_flow_[size_t(L)], tmp);
+            for (int d = 0; d < ndirs; ++d) std::swap(level_flow_[d][size_t(L)], level_tmp_[d][size_t(L)]);
         }
     }
 
-    const GpuTexture& raw = level_flow_[0];
-    out.ensure(dev, raw.width, raw.height, DXGI_FORMAT_R32G32_FLOAT,
-               D3D11_BIND_SHADER_RESOURCE | D3D11_BIND_UNORDERED_ACCESS, "flow");
+    const GpuTexture& raw = level_flow_[0][0];
+    for (int d = 0; d < ndirs; ++d)
+        dirs[d].out->ensure(dev, raw.width, raw.height, DXGI_FORMAT_R32G32_FLOAT, bind, "flow");
     struct {
         int32_t w, h, p0, p1;
     } mcb{int32_t(raw.width), int32_t(raw.height), 0, 0};
-    ID3D11Buffer* b = d3d_->constants(mcb);
-    ctx->CSSetConstantBuffers(0, 1, &b);
-    ID3D11ShaderResourceView* srv = raw.srv.Get();
-    ctx->CSSetShaderResources(0, 1, &srv);
-    ID3D11UnorderedAccessView* uav = out.uav.Get();
-    ctx->CSSetUnorderedAccessViews(0, 1, &uav, nullptr);
+    ID3D11Buffer* mb = d3d_->constants(mcb);
+    ctx->CSSetConstantBuffers(0, 1, &mb);
+    ID3D11ShaderResourceView* msrv[2] = {raw.srv.Get(), two ? level_flow_[1][0].srv.Get() : nullptr};
+    ctx->CSSetShaderResources(0, 2, msrv);
+    ID3D11UnorderedAccessView* muav[2] = {dirs[0].out->uav.Get(), two ? dirs[1].out->uav.Get() : nullptr};
+    ctx->CSSetUnorderedAccessViews(0, 2, muav, nullptr);
     ctx->CSSetShader(cs_median_.Get(), nullptr, 0);
-    ctx->Dispatch(div_up(raw.width, 8), div_up(raw.height, 8), 1);
+    ctx->Dispatch(div_up(raw.width, 8), div_up(raw.height, 8), UINT(ndirs));
     d3d_->unbind_cs();
 }

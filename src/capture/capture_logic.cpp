@@ -143,11 +143,26 @@ int choose_mode(const std::vector<NativeMode>& modes, const ModeRequest& req) {
     return best;
 }
 
-const char* output_name(Output o) { return o == Output::NV12 ? "NV12" : "RGB32"; }
+const char* output_name(Output o) {
+    switch (o) {
+    case Output::NV12: return "NV12";
+    case Output::YUY2: return "YUY2";
+    default: return "RGB32";
+    }
+}
 
 std::vector<Output> output_order(Subtype native) {
-    if (native == Subtype::RGB32) return {Output::RGB32, Output::NV12};
-    return {Output::NV12, Output::RGB32};
+    if (native == Subtype::RGB32) return {Output::RGB32, Output::NV12, Output::YUY2};
+    return {Output::NV12, Output::YUY2, Output::RGB32};
+}
+
+std::optional<Output> output_from_subtype(Subtype s) {
+    switch (s) {
+    case Subtype::NV12: return Output::NV12;
+    case Subtype::YUY2: return Output::YUY2;
+    case Subtype::RGB32: return Output::RGB32;
+    default: return std::nullopt;
+    }
 }
 
 namespace {

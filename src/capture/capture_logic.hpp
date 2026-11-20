@@ -87,10 +87,14 @@ int choose_mode(const std::vector<NativeMode>& modes, const ModeRequest& req);
 // --- Format de sortie demandé au Source Reader -------------------------------------------------------------
 
 // NV12 : le Source Reader convertit (YUY2, MJPEG, P010, H.264...) puis le VideoProcessor D3D11 passe en BGRA.
-// RGB32 : repli si le Source Reader refuse le NV12, ou format natif déjà RGB (pas d'aller-retour YUV).
-enum class Output { NV12, RGB32 };
+// YUY2 : repli si le NV12 est refusé (le VideoProcessor lit aussi le 4:2:2 entrelacé).
+// RGB32 : dernier repli, ou format natif déjà RGB (pas d'aller-retour YUV).
+enum class Output { NV12, YUY2, RGB32 };
 const char*         output_name(Output o);
 std::vector<Output> output_order(Subtype native);
+// Format effectivement livré (MF_MT_SUBTYPE du type courant) : uniquement NV12, YUY2 ou RGB32 ; tout autre
+// sous-type (ou inconnu) -> nullopt, jamais interprété comme du NV12.
+std::optional<Output> output_from_subtype(Subtype s);
 
 // --- Périphérique ---------------------------------------------------------------------------------------
 

@@ -198,7 +198,7 @@ struct MfCaptureSource::Impl {
     ComPtr<IMFDXGIDeviceManager> devmgr;
     ComPtr<IMFMediaSource>      source;
     ComPtr<IMFSourceReader>     reader;
-    cl::Output                  output = cl::Output::NV12;  // format demandé au Source Reader (fixé au démarrage)
+    cl::Output                  output = cl::Output::NV12;  // format livré (MF_MT_SUBTYPE), protégé par mu
 
     std::thread       thread;            // lecture synchrone (--capture-sync) uniquement
     ComPtr<ReaderCallback> callback;     // lecture asynchrone (défaut)
@@ -231,6 +231,7 @@ struct MfCaptureSource::Impl {
     std::vector<InView>                    views;
     UINT32                                 vp_w = 0, vp_h = 0;
     bool                                   vp_full = false, vp_601 = false;
+    cl::Output                             vp_fmt  = cl::Output::NV12;
     GpuTexture                             out;
     // Chemin mémoire système : deux textures staging en alternance (Map n'attend pas la copie GPU précédente).
     ComPtr<ID3D11Texture2D>                staging[2], upload;
@@ -243,9 +244,9 @@ struct MfCaptureSource::Impl {
     void loop();
     // Traite le résultat d'une lecture (synchrone ou asynchrone) ; false = arrêter de lire.
     bool on_sample(HRESULT hr, DWORD flags, LONGLONG ts, IMFSample* sample);
-    bool ensure_processor(UINT32 w, UINT32 h, bool full, bool b601);
+    bool ensure_processor(UINT32 w, UINT32 h, bool full, bool b601, cl::Output fmt);
     ID3D11VideoProcessorInputView* input_view(ID3D11Texture2D* tex, UINT slice);
-    bool upload_system_memory(IMFMediaBuffer* buf, UINT32 w, UINT32 h, LONG default_stride);
+    bool upload_system_memory(IMFMediaBuffer* buf, UINT32 w, UINT32 h, LONG default_stride, cl::Output fmt);
 };
 
 void MfCaptureSource::Impl::read_format() {
@@ -258,7 +259,13 @@ void MfCaptureSource::Impl::read_format() {
     const UINT32 matrix = MFGetAttributeUINT32(cur.Get(), MF_MT_YUV_MATRIX,
                                                h < 720 ? MFVideoTransferMatrix_BT601 : MFVideoTransferMatrix_BT709);
     const LONG   st     = LONG(MFGetAttributeUINT32(cur.Get(), MF_MT_DEFAULT_STRIDE, 0));  // UINT32 signé
+    GUID         sub{};
+    cur->GetGUID(MF_MT_SUBTYPE, &sub);
+    // Jamais de sous-type supposé : seul ce que le Source Reader annonce (NV12, YUY2, RGB32) est converti.
+    const auto   o      = cl::output_from_subtype(to_subtype(sub));
+    if (!o) throw std::runtime_error(std::string("sous-type livré non géré (") + cl::subtype_name(to_subtype(sub)) + ")");
     std::lock_guard lk(mu);
+    output     = *o;
     width      = w;
     height     = h;
     full_range = range == MFNominalRange_0_255;
@@ -338,8 +345,8 @@ void MfCaptureSource::Impl::loop() {
     if (SUCCEEDED(co)) CoUninitialize();
 }
 
-bool MfCaptureSource::Impl::ensure_processor(UINT32 w, UINT32 h, bool full, bool b601) {
-    if (vp && vp_w == w && vp_h == h && vp_full == full && vp_601 == b601) return true;
+bool MfCaptureSource::Impl::ensure_processor(UINT32 w, UINT32 h, bool full, bool b601, cl::Output fmt) {
+    if (vp && vp_w == w && vp_h == h && vp_full == full && vp_601 == b601 && vp_fmt == fmt) return true;
     auto* vdev = d3d.video_device();
     auto* vctx = d3d.video_ctx();
     if (!vdev || !vctx) throw std::runtime_error("API vidéo D3D11 indisponible : conversion en BGRA impossible");
@@ -349,7 +356,7 @@ bool MfCaptureSource::Impl::ensure_processor(UINT32 w, UINT32 h, bool full, bool
     vp.Reset();
     en.Reset();
 
-    // Le même VideoProcessor sert pour une entrée NV12 (YUV -> RGB) ou RGB32 (copie, alpha opaque).
+    // Le même VideoProcessor sert pour une entrée NV12/YUY2 (YUV -> RGB) ou RGB32 (copie, alpha opaque).
     D3D11_VIDEO_PROCESSOR_CONTENT_DESC cd{};
     cd.InputFrameFormat = D3D11_VIDEO_FRAME_FORMAT_PROGRESSIVE;
     cd.InputFrameRate   = {60, 1};
@@ -360,6 +367,13 @@ bool MfCaptureSource::Impl::ensure_processor(UINT32 w, UINT32 h, bool full, bool
     cd.OutputHeight     = h;
     cd.Usage            = D3D11_VIDEO_USAGE_PLAYBACK_NORMAL;
     check_hr(vdev->CreateVideoProcessorEnumerator(&cd, &en), "CreateVideoProcessorEnumerator (capture)");
+    // Le VideoProcessor doit accepter le format livré en entrée (NV12 et YUY2 : quasi universels ; vérifié).
+    const DXGI_FORMAT in_fmt = fmt == cl::Output::NV12   ? DXGI_FORMAT_NV12
+                               : fmt == cl::Output::YUY2 ? DXGI_FORMAT_YUY2
+                                                         : DXGI_FORMAT_B8G8R8A8_UNORM;
+    UINT support = 0;
+    if (FAILED(en->CheckVideoProcessorFormat(in_fmt, &support)) || !(support & D3D11_VIDEO_PROCESSOR_FORMAT_SUPPORT_INPUT))
+        throw std::runtime_error(std::string("le VideoProcessor D3D11 ne lit pas le ") + cl::output_name(fmt));
     check_hr(vdev->CreateVideoProcessor(en.Get(), 0, &vp), "CreateVideoProcessor (capture)");
 
     out.ensure(d3d.device(), w, h, DXGI_FORMAT_B8G8R8A8_UNORM, D3D11_BIND_SHADER_RESOURCE | D3D11_BIND_RENDER_TARGET,
@@ -387,9 +401,10 @@ bool MfCaptureSource::Impl::ensure_processor(UINT32 w, UINT32 h, bool full, bool
     vp_h    = h;
     vp_full = full;
     vp_601  = b601;
-    if (output == cl::Output::NV12)
-        log_msg("Carte de capture : conversion NV12 %ux%u (BT.%s, plage %s) -> BGRA", w, h, b601 ? "601" : "709",
-                full ? "pleine" : "limitée");
+    vp_fmt  = fmt;
+    if (fmt != cl::Output::RGB32)
+        log_msg("Carte de capture : conversion %s %ux%u (BT.%s, plage %s) -> BGRA", cl::output_name(fmt), w, h,
+                b601 ? "601" : "709", full ? "pleine" : "limitée");
     else
         log_msg("Carte de capture : RGB32 %ux%u -> BGRA", w, h);
     return true;
@@ -410,12 +425,15 @@ ID3D11VideoProcessorInputView* MfCaptureSource::Impl::input_view(ID3D11Texture2D
     return views.back().view.Get();
 }
 
-bool MfCaptureSource::Impl::upload_system_memory(IMFMediaBuffer* buf, UINT32 w, UINT32 h, LONG default_stride) {
+bool MfCaptureSource::Impl::upload_system_memory(IMFMediaBuffer* buf, UINT32 w, UINT32 h, LONG default_stride,
+                                                 cl::Output out_fmt) {
     auto*             dev  = d3d.device();
     auto*             ctx  = d3d.ctx();
-    const bool        nv12 = output == cl::Output::NV12;
-    const DXGI_FORMAT fmt  = nv12 ? DXGI_FORMAT_NV12 : DXGI_FORMAT_B8G8R8A8_UNORM;
-    const size_t      row  = nv12 ? size_t(w) : size_t(w) * 4;  // octets utiles par ligne (plan Y pour le NV12)
+    const bool        nv12 = out_fmt == cl::Output::NV12;
+    const bool        yuy2 = out_fmt == cl::Output::YUY2;
+    const DXGI_FORMAT fmt  = nv12 ? DXGI_FORMAT_NV12 : yuy2 ? DXGI_FORMAT_YUY2 : DXGI_FORMAT_B8G8R8A8_UNORM;
+    // Octets utiles par ligne : plan Y pour le NV12, 2 octets/pixel en YUY2 (4:2:2 entrelacé), 4 en RGB32.
+    const size_t      row  = nv12 ? size_t(w) : yuy2 ? size_t(w) * 2 : size_t(w) * 4;
 
     D3D11_TEXTURE2D_DESC have{};
     if (staging[0]) staging[0]->GetDesc(&have);
@@ -454,6 +472,7 @@ bool MfCaptureSource::Impl::upload_system_memory(IMFMediaBuffer* buf, UINT32 w, 
         DWORD len  = 0;
         if (FAILED(buf->Lock(&base, nullptr, &len))) return false;
         step = nv12 ? ptrdiff_t(w) : (default_stride ? ptrdiff_t(default_stride) : ptrdiff_t(row));
+        if (yuy2 && step < 0) step = -step;  // YUV : toujours de haut en bas
         const size_t abs_step = size_t(step < 0 ? -step : step);
         const size_t need     = nv12 ? abs_step * h * 3 / 2 : abs_step * h;
         if (abs_step < row || size_t(len) < need) {  // tampon plus court qu'une image : lecture hors limites
@@ -466,8 +485,8 @@ bool MfCaptureSource::Impl::upload_system_memory(IMFMediaBuffer* buf, UINT32 w, 
         if (two_d) b2->Unlock2D();
         else buf->Unlock();
     };
-    // NV12 : plans Y puis UV contigus, donc pas positif obligatoire ; RGB32 : |pas| >= une ligne.
-    if ((nv12 && step < ptrdiff_t(w)) || size_t(step < 0 ? -step : step) < row) {
+    // NV12/YUY2 : de haut en bas (pas positif obligatoire) ; tous : |pas| >= une ligne.
+    if (((nv12 || yuy2) && step < ptrdiff_t(row)) || size_t(step < 0 ? -step : step) < row) {
         unlock();
         return false;
     }
@@ -580,24 +599,26 @@ bool MfCaptureSource::start_impl(const std::wstring& needle, const std::wstring&
     check_hr(m.reader->SetCurrentMediaType(DWORD(MF_SOURCE_READER_FIRST_VIDEO_STREAM), nullptr, types[size_t(best)].Get()),
              "SetCurrentMediaType (natif)");
 
-    // Format de sortie : NV12 (ou RGB32 si natif RGB / NV12 refusé), converti ensuite en BGRA sur le GPU.
+    // Format de sortie : NV12, sinon YUY2, sinon RGB32 (RGB32 d'abord si natif RGB), converti ensuite en BGRA sur
+    // le GPU. read_format() relit le sous-type effectivement livré et refuse tout autre format.
     bool ok = false;
     for (cl::Output o : cl::output_order(native.subtype)) {
         ComPtr<IMFMediaType> t;
         check_hr(MFCreateMediaType(&t), "MFCreateMediaType");
         t->SetGUID(MF_MT_MAJOR_TYPE, MFMediaType_Video);
-        t->SetGUID(MF_MT_SUBTYPE, o == cl::Output::NV12 ? MFVideoFormat_NV12 : MFVideoFormat_RGB32);
+        t->SetGUID(MF_MT_SUBTYPE, o == cl::Output::NV12   ? MFVideoFormat_NV12
+                                  : o == cl::Output::YUY2 ? MFVideoFormat_YUY2
+                                                          : MFVideoFormat_RGB32);
         const HRESULT hr = m.reader->SetCurrentMediaType(DWORD(MF_SOURCE_READER_FIRST_VIDEO_STREAM), nullptr, t.Get());
         if (SUCCEEDED(hr)) {
-            m.output = o;
-            ok       = true;
+            ok = true;  // le format réellement livré est relu (et vérifié) par read_format()
             break;
         }
         log_msg("Carte de capture : sortie %s refusée par le Source Reader (0x%08lX)", cl::output_name(o),
                 static_cast<unsigned long>(hr));
     }
     if (!ok) {
-        log_msg("Carte de capture : format natif %s non convertible (ni NV12 ni RGB32) ; essaie un autre --mode.",
+        log_msg("Carte de capture : format natif %s non convertible (ni NV12, ni YUY2, ni RGB32) ; essaie un autre --mode.",
                 cl::subtype_name(native.subtype));
         return false;
     }
@@ -670,9 +691,11 @@ bool MfCaptureSource::poll_impl(SourceFrame& out) {
     UINT32 w = 0, h = 0;
     bool   full = false, b601 = false;
     LONG   stride = 0;
+    cl::Output fmt = cl::Output::NV12;
     {
         std::lock_guard lk(m.mu);
         if (!m.latest) return false;
+        fmt    = m.output;
         sample = std::move(m.latest);
         t      = m.latest_time;
         w      = m.width & ~1u;
@@ -691,7 +714,7 @@ bool MfCaptureSource::poll_impl(SourceFrame& out) {
 
     ComPtr<IMFMediaBuffer> buf;
     if (FAILED(sample->GetBufferByIndex(0, &buf))) return false;
-    m.ensure_processor(w, h, full, b601);
+    m.ensure_processor(w, h, full, b601, fmt);
 
     ID3D11Texture2D* in_tex = nullptr;
     UINT             slice  = 0;
@@ -702,7 +725,7 @@ bool MfCaptureSource::poll_impl(SourceFrame& out) {
         dx->GetSubresourceIndex(&slice);
         in_tex = gpu_tex.Get();
     } else {
-        if (!m.upload_system_memory(buf.Get(), w, h, stride)) return false;
+        if (!m.upload_system_memory(buf.Get(), w, h, stride, fmt)) return false;
         in_tex = m.upload.Get();
     }
     if (!m.logged_path) {

@@ -10,9 +10,9 @@ bool list_capture_modes(const std::wstring& needle, std::wstring& device, std::v
 // Carte de capture HDMI (PS5 branchée en HDMI) via Media Foundation : `--source capture` (alias `--hdmi`).
 // - Choisit le meilleur mode natif : >= 60 fps d'abord, puis la plus grande résolution (<= 4K),
 //   puis un format non compressé (moins de latence que le MJPEG) ; ou le mode demandé (--mode).
-// - Demande du NV12 au Source Reader (qui décode/convertit YUY2, MJPEG, P010, H.264...), du RGB32 si le natif
-//   est RGB ou si le NV12 est refusé ; si la carte livre des textures GPU (gestionnaire DXGI), aucune copie
-//   CPU, sinon une seule copie vers le GPU.
+// - Demande du NV12 au Source Reader (qui décode/convertit YUY2, MJPEG, P010, H.264...), sinon du YUY2, sinon
+//   du RGB32 (RGB32 d'abord si le natif est RGB) ; le sous-type livré est relu et vérifié. Si la carte livre
+//   des textures GPU (gestionnaire DXGI), aucune copie CPU, sinon une seule copie vers le GPU.
 // - Conversion -> BGRA par le VideoProcessor D3D11 (couleurs BT.601/709, plage limitée/pleine lues dans le
 //   type média), conforme au contrat de SourceFrame.
 // - Lecture asynchrone (IMFSourceReaderCallback) : on ne garde que l'image la plus récente et on signale

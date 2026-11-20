@@ -9,6 +9,7 @@
 #include <cmath>
 #include <cstdio>
 #include <random>
+#include <string>
 
 using namespace capture_logic;
 
@@ -184,9 +185,19 @@ int main() {
         const auto y = output_order(Subtype::YUY2);
         const auto j = output_order(Subtype::MJPG);
         const auto r = output_order(Subtype::RGB32);
-        expect(n.size() == 2 && n[0] == Output::NV12 && n[1] == Output::RGB32, "NV12 natif : NV12 puis RGB32", 0);
+        expect(n.size() == 3 && n[0] == Output::NV12 && n[1] == Output::YUY2 && n[2] == Output::RGB32,
+               "NV12 natif : NV12, puis YUY2, puis RGB32", 0);
         expect(y[0] == Output::NV12 && j[0] == Output::NV12, "YUY2 / MJPEG : NV12 d'abord (conversion MF)", 0);
-        expect(r[0] == Output::RGB32 && r[1] == Output::NV12, "RGB32 natif : RGB32 d'abord (pas d'aller-retour YUV)", 0);
+        expect(r[0] == Output::RGB32 && r[1] == Output::NV12 && r.size() == 3,
+               "RGB32 natif : RGB32 d'abord (pas d'aller-retour YUV)", 0);
+        expect(output_from_subtype(Subtype::NV12) == Output::NV12 && output_from_subtype(Subtype::YUY2) == Output::YUY2 &&
+                   output_from_subtype(Subtype::RGB32) == Output::RGB32,
+               "sous-type livré : NV12 / YUY2 / RGB32 reconnus", 0);
+        bool none = true;
+        for (Subtype st : {Subtype::P010, Subtype::MJPG, Subtype::H264, Subtype::HEVC, Subtype::Other})
+            none &= !output_from_subtype(st).has_value();
+        expect(none, "sous-type livré inconnu : refusé (jamais lu comme du NV12)", 0);
+        expect(std::string(output_name(Output::YUY2)) == "YUY2", "nom YUY2", 0);
         expect(is_uncompressed(Subtype::P010) && !is_uncompressed(Subtype::MJPG) && !is_uncompressed(Subtype::H264),
                "compressé / non compressé", 0);
     }

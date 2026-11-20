@@ -129,3 +129,9 @@ affichée.
 - Modèle RIFE (ONNX Runtime + DirectML ou TensorRT) à la place de l'estimateur par blocs, avec la
   même mire pour mesurer le gain.
 - Récupérer les frames décodées directement dans chiaki (moins de latence que WGC).
+
+## Licence
+
+rpenhance est distribué sous licence **MIT** (voir [`LICENSE`](LICENSE)). Dear ImGui (MIT, Omar
+Cornut), téléchargé à la compilation, et les projets dont des idées ont été reprises sont listés
+dans [`THIRD-PARTY-NOTICES.md`](THIRD-PARTY-NOTICES.md).

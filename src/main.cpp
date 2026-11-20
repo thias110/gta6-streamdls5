@@ -36,16 +36,18 @@ int WINAPI wWinMain(HINSTANCE, HINSTANCE, PWSTR, int) {
     }
 
     try {
+        if (cfg.selftest_tap) return run_selftest_tap(cfg);
         if (cfg.selftest) return run_selftest(cfg);
         App app(cfg);
         return app.run();
     } catch (const winrt::hresult_error& e) {
         std::string msg = "Erreur WinRT 0x" + std::to_string(uint32_t(e.code())) + " : " + winrt::to_string(e.message());
         log_msg("%s", msg.c_str());
-        if (!cfg.selftest) MessageBoxA(nullptr, msg.c_str(), "rpenhance - erreur fatale", MB_OK | MB_ICONERROR);
+        if (!cfg.selftest && !cfg.selftest_tap)
+            MessageBoxA(nullptr, msg.c_str(), "rpenhance - erreur fatale", MB_OK | MB_ICONERROR);
     } catch (const std::exception& e) {
         log_msg("Erreur fatale : %s", e.what());
-        if (!cfg.selftest) MessageBoxA(nullptr, e.what(), "rpenhance - erreur fatale", MB_OK | MB_ICONERROR);
+        if (!cfg.selftest && !cfg.selftest_tap) MessageBoxA(nullptr, e.what(), "rpenhance - erreur fatale", MB_OK | MB_ICONERROR);
     }
     return -1;
 }

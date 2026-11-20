@@ -38,6 +38,7 @@ add_executable(rpenhance WIN32
     src/config.cpp
     src/app.cpp
     src/selftest.cpp
+    src/selftest_tap.cpp
     src/gpu/d3d_context.cpp
     src/gpu/profiler.cpp
     src/capture/wgc_capture.cpp
@@ -128,3 +129,8 @@ add_test(NAME scene_cut COMMAND rpenhance_cut_tests)
 add_executable(rpenhance_tap_tests tests/tap_protocol_test.cpp src/capture/tap_protocol.cpp)
 target_include_directories(rpenhance_tap_tests PRIVATE src)
 add_test(NAME tap_protocol COMMAND rpenhance_tap_tests)
+
+# Émetteur de test du frame tap (copie adaptée de l'émetteur MIT de SmoovPlay) : alimente
+# `rpenhance --selftest-tap` dans la CI (voir .github/workflows/windows-build.yml). Programme console.
+add_executable(tap_writer tests/tap_writer.cpp src/capture/tap_protocol.cpp)
+target_include_directories(tap_writer PRIVATE src)

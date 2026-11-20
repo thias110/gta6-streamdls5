@@ -28,6 +28,7 @@ struct Config {
     SourceKind   source = SourceKind::Wgc;
     std::wstring tap_name = L"Local\\smoovplay-tap";  // mémoire partagée du frame tap
     bool  tap_trust_flags = false;  // utiliser les métadonnées du tap (répétition, pertes) dans le pipeline
+    bool  selftest_tap  = false;  // contrôle du frame tap (avec tests/tap_writer) sans fenêtre, puis quitte
     bool  allow_tearing = true;   // VRR/tearing quand la frame generation est coupée
     bool  debug_layer   = false;
     bool  warp          = false;  // rasteriseur logiciel WARP (CI sans GPU) au lieu du GPU matériel

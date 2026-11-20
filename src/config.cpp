@@ -47,6 +47,8 @@ const wchar_t* usage_text() {
                               pas d'interpolation vers ou depuis elle (désactivé par défaut)
   --test-pattern              source synthétique (pas besoin de PS5)
   --selftest                  mesure qualité/perf de l'interpolation puis quitte
+  --selftest-tap              lit des frames du tap (émises par tap_writer), vérifie
+                              leur contenu, puis quitte (code 0 si tout passe)
   --debug                     active la couche de debug D3D11
   --warp                      rendu logiciel D3D11 WARP au lieu du GPU (CI sans
                               GPU, très lent ; échoue tout de suite s'il manque
@@ -89,6 +91,7 @@ Config parse_command_line() {
         else if (s == L"--no-stats") c.show_stats = false;
         else if (s == L"--test-pattern") c.test_pattern = true;
         else if (s == L"--selftest") c.selftest = true;
+        else if (s == L"--selftest-tap") c.selftest_tap = true;
         else if (s == L"--tap-name") c.tap_name = value(i);
         else if (s == L"--tap-trust-flags") c.tap_trust_flags = true;
         else if (s == L"--source") {

@@ -132,7 +132,7 @@ bool Pipeline::render(ID3D11RenderTargetView* rtv, const D3D11_VIEWPORT& vp, dou
     bool generated = false;
 
     if (settings.flow_viz && latest->has_flow) {
-        comp_.flow_viz(latest->up.srv.Get(), latest->flow_fwd.srv.Get(), 25.0f);
+        comp_.flow_viz(latest->up.srv.Get(), latest->flow_fwd.srv.Get(), 25.0f, latest->pyr.flow_scale());
     } else if (!settings.frame_gen || n < 2 || interval_ <= 0.0) {
         comp_.blit(latest->up.srv.Get());
     } else {
@@ -155,7 +155,7 @@ bool Pipeline::render(ID3D11RenderTargetView* rtv, const D3D11_VIEWPORT& vp, dou
             ref = t < 0.5f ? a : b;
             if (b->has_flow && b->prev_id == a->id && span < 0.25) {
                 comp_.synth(a->up.srv.Get(), b->up.srv.Get(), b->flow_fwd.srv.Get(), b->flow_bwd.srv.Get(), t,
-                            settings.synth);
+                            settings.synth, b->pyr.flow_scale());
                 generated        = t > 0.05f && t < 0.95f;  // sinon quasi identique à une vraie frame
                 info_.last_alpha = t;
             } else {

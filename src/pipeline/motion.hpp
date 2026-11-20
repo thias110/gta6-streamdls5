@@ -1,5 +1,15 @@
 #pragma once
 #include "../gpu/d3d_context.hpp"
+#include "compositor.hpp"
+
+inline constexpr uint32_t kFlowBlock = 8;  // taille des blocs du flow (BS dans kMotion)
+
+// Grille de flow d'un niveau de taille `s` : div_up(s, 8) blocs ; facteur UV image -> UV grille.
+inline FlowScale flow_grid_scale(uint32_t w, uint32_t h) {
+    const uint32_t gw = (w + kFlowBlock - 1) / kFlowBlock, gh = (h + kFlowBlock - 1) / kFlowBlock;
+    if (!gw || !gh) return {};
+    return {float(w) / float(gw * kFlowBlock), float(h) / float(gh * kFlowBlock)};
+}
 
 // Pyramide de luminance R16F ; niveau 0 = demi-résolution de la capture.
 struct LumaPyramid {
@@ -9,6 +19,8 @@ struct LumaPyramid {
 
     void ensure(ID3D11Device* dev, Size2D src);
     bool valid() const { return !levels.empty(); }
+    // Facteur à appliquer aux UV image pour lire le flow de niveau 0 (sortie de estimate_flow).
+    FlowScale flow_scale() const { return valid() ? flow_grid_scale(levels[0].width, levels[0].height) : FlowScale{}; }
 };
 
 struct DiffResult {

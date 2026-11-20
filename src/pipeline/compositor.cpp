@@ -60,16 +60,18 @@ void Compositor::draw(ID3D11PixelShader* ps, std::initializer_list<ID3D11ShaderR
 void Compositor::blit(ID3D11ShaderResourceView* src) { draw(blit_.Get(), {src}); }
 
 void Compositor::synth(ID3D11ShaderResourceView* a, ID3D11ShaderResourceView* b, ID3D11ShaderResourceView* flow_ab,
-                       ID3D11ShaderResourceView* flow_ba, float t, const SynthParams& p) {
+                       ID3D11ShaderResourceView* flow_ba, float t, const SynthParams& p, FlowScale fs) {
     struct {
-        float t, slo, shi, elo, ehi, pad[3];
-    } cb{t, p.static_lo, p.static_hi, p.err_lo, p.err_hi, {}};
+        float t, slo, shi, elo, ehi, fsx, fsy, pad;
+    } cb{t, p.static_lo, p.static_hi, p.err_lo, p.err_hi, fs.x, fs.y, 0.0f};
+    static_assert(sizeof(cb) == 32);
     draw(synth_.Get(), {a, b, flow_ab, flow_ba}, d3d_->constants(cb));
 }
 
-void Compositor::flow_viz(ID3D11ShaderResourceView* img, ID3D11ShaderResourceView* flow, float scale) {
+void Compositor::flow_viz(ID3D11ShaderResourceView* img, ID3D11ShaderResourceView* flow, float scale,
+                          FlowScale fs) {
     struct {
-        float scale, pad[3];
-    } cb{scale, {}};
+        float scale, pad, fsx, fsy;
+    } cb{scale, 0.0f, fs.x, fs.y};
     draw(viz_.Get(), {img, flow}, d3d_->constants(cb));
 }

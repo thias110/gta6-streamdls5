@@ -128,13 +128,17 @@ void MotionEngine::estimate_flow(const LumaPyramid& x, const LumaPyramid& y, ID3
         int32_t  radius;
         uint32_t flags;
         float    temporal_sign, lambda, zero_bias, pad;
+        float    coarse_scale[2];
+        float    temporal_scale[2];
     };
-    static_assert(sizeof(MotionCB) == 48);
+    static_assert(sizeof(MotionCB) == 64);
+    // Le flow temporel est le niveau 0 de la paire précédente (même taille de capture).
+    const FlowScale ts = flow_grid_scale(x.levels[0].width, x.levels[0].height);
 
     for (int L = top; L >= 0; --L) {
         const GpuTexture& lx = x.levels[size_t(L)];
         const GpuTexture& ly = y.levels[size_t(L)];
-        const uint32_t gw = div_up(lx.width, 8), gh = div_up(lx.height, 8);
+        const uint32_t gw = div_up(lx.width, kFlowBlock), gh = div_up(lx.height, kFlowBlock);
         GpuTexture& dst = level_flow_[size_t(L)];
         dst.ensure(dev, gw, gh, DXGI_FORMAT_R32G32_FLOAT, D3D11_BIND_SHADER_RESOURCE | D3D11_BIND_UNORDERED_ACCESS,
                    "flow level");
@@ -151,6 +155,16 @@ void MotionEngine::estimate_flow(const LumaPyramid& x, const LumaPyramid& y, ID3
         cb.temporal_sign = temporal_sign;
         cb.lambda        = L == top ? 0.0f : 0.0012f;
         cb.zero_bias     = 0.0025f;
+        if (L < top) {
+            const GpuTexture& lc = x.levels[size_t(L + 1)];
+            const FlowScale   cs = flow_grid_scale(lc.width, lc.height);
+            cb.coarse_scale[0] = cs.x;
+            cb.coarse_scale[1] = cs.y;
+        } else {
+            cb.coarse_scale[0] = cb.coarse_scale[1] = 1.0f;
+        }
+        cb.temporal_scale[0] = ts.x;
+        cb.temporal_scale[1] = ts.y;
 
         ID3D11Buffer* b = d3d_->constants(cb);
         ctx->CSSetConstantBuffers(0, 1, &b);

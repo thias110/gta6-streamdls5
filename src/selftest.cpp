@@ -140,7 +140,7 @@ int run_selftest(const Config& cfg) {
         upscale_to(GT, GTup);
 
         comp.begin(Syn.rtv.Get(), vp);
-        comp.synth(Aup.srv.Get(), Bup.srv.Get(), fab.srv.Get(), fba.srv.Get(), 0.5f, SynthParams{});
+        comp.synth(Aup.srv.Get(), Bup.srv.Get(), fab.srv.Get(), fba.srv.Get(), 0.5f, SynthParams{}, pa.flow_scale());
         comp.end();
 
         const Image iA = readback(d3d, Aup), iB = readback(d3d, Bup), iGT = readback(d3d, GTup),
@@ -155,7 +155,7 @@ int run_selftest(const Config& cfg) {
 
         if (speed == 1.0f) {
             comp.begin(Viz.rtv.Get(), vp);
-            comp.flow_viz(Aup.srv.Get(), fab.srv.Get(), 25.0f);
+            comp.flow_viz(Aup.srv.Get(), fab.srv.Get(), 25.0f, pa.flow_scale());
             comp.end();
             write_bmp(dir + L"a.bmp", iA);
             write_bmp(dir + L"b.bmp", iB);
@@ -177,7 +177,7 @@ int run_selftest(const Config& cfg) {
         prof.end(ctx, GpuSection::Flow);
         prof.begin(ctx, GpuSection::Compose);
         comp.begin(Syn.rtv.Get(), vp);
-        comp.synth(Aup.srv.Get(), Bup.srv.Get(), fab.srv.Get(), fba.srv.Get(), 0.5f, SynthParams{});
+        comp.synth(Aup.srv.Get(), Bup.srv.Get(), fab.srv.Get(), fba.srv.Get(), 0.5f, SynthParams{}, pa.flow_scale());
         comp.end();
         prof.end(ctx, GpuSection::Compose);
         prof.end_frame(ctx);

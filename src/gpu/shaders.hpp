@@ -178,6 +178,10 @@ cbuffer MotionCB : register(b0) {
     float  g_lambda;
     float  g_zero_bias;
     float  g_mpad;
+    // UV image -> UV de grille : la grille compte div_up(taille, 8) blocs, donc couvre un peu plus
+    // que l'image quand la taille n'est pas multiple de 8 (scale = taille / (grille * 8)).
+    float2 g_coarse_scale;    // pour g_coarse (niveau L+1)
+    float2 g_temporal_scale;  // pour g_temporal (niveau 0 de la paire précédente)
 };
 
 #define BS 8
@@ -219,15 +223,15 @@ void cs_motion_search(uint3 id : SV_DispatchThreadID) {
     uint n = 0;
     cands[n++] = int2(0, 0);
     if (g_flags & FLAG_COARSE) {
-        pred = to_px(g_coarse.SampleLevel(g_linear, cuv, 0));
+        pred = to_px(g_coarse.SampleLevel(g_linear, cuv * g_coarse_scale, 0));
         cands[n++] = pred;
-        cands[n++] = to_px(g_coarse.SampleLevel(g_point, cuv + float2(nstep.x, 0.0), 0));
-        cands[n++] = to_px(g_coarse.SampleLevel(g_point, cuv - float2(nstep.x, 0.0), 0));
-        cands[n++] = to_px(g_coarse.SampleLevel(g_point, cuv + float2(0.0, nstep.y), 0));
-        cands[n++] = to_px(g_coarse.SampleLevel(g_point, cuv - float2(0.0, nstep.y), 0));
+        cands[n++] = to_px(g_coarse.SampleLevel(g_point, (cuv + float2(nstep.x, 0.0)) * g_coarse_scale, 0));
+        cands[n++] = to_px(g_coarse.SampleLevel(g_point, (cuv - float2(nstep.x, 0.0)) * g_coarse_scale, 0));
+        cands[n++] = to_px(g_coarse.SampleLevel(g_point, (cuv + float2(0.0, nstep.y)) * g_coarse_scale, 0));
+        cands[n++] = to_px(g_coarse.SampleLevel(g_point, (cuv - float2(0.0, nstep.y)) * g_coarse_scale, 0));
     }
     if (g_flags & FLAG_TEMPORAL)
-        cands[n++] = to_px(g_temporal_sign * g_temporal.SampleLevel(g_linear, cuv, 0));
+        cands[n++] = to_px(g_temporal_sign * g_temporal.SampleLevel(g_linear, cuv * g_temporal_scale, 0));
 
     float best = 1e9;
     int2  bv   = int2(0, 0);
@@ -352,14 +356,15 @@ cbuffer SynthCB : register(b0) {
     float  g_static_hi;
     float  g_err_lo;
     float  g_err_hi;
-    float3 g_spad;
+    float2 g_flow_scale;  // UV image -> UV de la grille de flow (taille / (grille * 8))
+    float  g_spad;
 };
 
 float4 ps_synth(VSOut i) : SV_Target {
     float2 uv = i.uv;
     float  t  = g_t;
-    float2 fab = g_fab.SampleLevel(g_linear, uv, 0);
-    float2 fba = g_fba.SampleLevel(g_linear, uv, 0);
+    float2 fab = g_fab.SampleLevel(g_linear, uv * g_flow_scale, 0);
+    float2 fba = g_fba.SampleLevel(g_linear, uv * g_flow_scale, 0);
     float2 fta = -(1.0 - t) * t * fab + t * t * fba;
     float2 ftb = (1.0 - t) * (1.0 - t) * fab - t * (1.0 - t) * fba;
 
@@ -395,13 +400,14 @@ Texture2D<float4> g_vimg  : register(t0);
 Texture2D<float2> g_vflow : register(t1);
 cbuffer VizCB : register(b0) {
     float  g_vscale;
-    float3 g_vpad;
+    float  g_vpad;
+    float2 g_vflow_scale;  // UV image -> UV de la grille de flow
 };
 float3 hue(float h) {
     return saturate(abs(fmod(h * 6.0 + float3(0.0, 4.0, 2.0), 6.0) - 3.0) - 1.0);
 }
 float4 ps_flow_viz(VSOut i) : SV_Target {
-    float2 f   = g_vflow.SampleLevel(g_linear, i.uv, 0);
+    float2 f   = g_vflow.SampleLevel(g_linear, i.uv * g_vflow_scale, 0);
     float  mag = length(f) * g_vscale;
     float  ang = atan2(f.y, f.x) / 6.2831853 + 0.5;
     float  g   = luma(g_vimg.SampleLevel(g_linear, i.uv, 0).rgb);

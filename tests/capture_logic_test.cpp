@@ -100,6 +100,38 @@ int main() {
         const double t = m.map(std::nullopt, std::nullopt, false, 42.0);
         expect(t == 42.0 && m.basis() == TimestampMapper::Basis::Arrival, "sans horodatage : arrivée", t);
     }
+    {  // 7. Horodatage figé (pilote qui renvoie toujours 0) : arrivée, sans recalage permanent.
+        TimestampMapper m;
+        const double a = m.map(std::nullopt, 0, true, 10.000);
+        const double b = m.map(std::nullopt, 0, false, 10.017);
+        const double c = m.map(std::nullopt, 0, false, 10.033);
+        expect(a == 10.000 && b == 10.017 && c == 10.033 && m.basis() == TimestampMapper::Basis::Arrival,
+               "horodatage toujours 0 : arrivée", c);
+        const double d = m.map(std::nullopt, hns(0.0167), false, 10.051);  // le pilote se met à horodater
+        expect(m.basis() == TimestampMapper::Basis::Mapped && d <= 10.051 && d > c, "puis horodatage valide : recalé", d);
+        const double neg = m.map(std::nullopt, -5, false, 10.070);
+        expect(neg == 10.070 && m.basis() == TimestampMapper::Basis::Arrival, "horodatage négatif : arrivée", neg);
+    }
+    {  // 8. Horloge du pilote qui recule de 5 ms (à-coup) : le résultat ne recule jamais, ni ne se répète.
+        TimestampMapper m;
+        const double a = m.map(hns(100.000), std::nullopt, true, 100.010);
+        const double b = m.map(hns(100.0167), std::nullopt, false, 100.027);
+        const double c = m.map(hns(100.0117), std::nullopt, false, 100.044);  // recule de 5 ms
+        const double d = m.map(hns(100.0117), std::nullopt, false, 100.050);  // répété
+        expect(a < b && b < c && c < d && c <= 100.044 && d <= 100.050, "pilote qui recule : résultat croissant",
+               c - b);
+        const double e = m.map(hns(99.0), std::nullopt, true, 99.010);  // discontinuité : recalage permis
+        expect(e == 99.0, "discontinuité : retour en arrière accepté", e);
+    }
+    {  // 9. Horloge du pilote hors bornes (0, futur, trop vieux) : jamais utilisée.
+        TimestampMapper m;
+        m.map(0, hns(1.0), true, 50.0);
+        expect(m.basis() == TimestampMapper::Basis::Mapped, "pilote à 0 : ignoré", 0);
+        m.map(hns(50.1), hns(1.0167), false, 50.0167);
+        expect(m.basis() == TimestampMapper::Basis::Mapped, "pilote dans le futur (+83 ms) : ignoré", 0);
+        m.map(hns(49.0), hns(1.0334), false, 50.0334);
+        expect(m.basis() == TimestampMapper::Basis::Mapped, "pilote trop ancien (1 s) : ignoré", 0);
+    }
 
     // --- Choix du mode ------------------------------------------------------------------------------------
     {

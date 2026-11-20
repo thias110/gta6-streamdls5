@@ -23,7 +23,9 @@ inline double hns_to_seconds(int64_t hns) { return double(hns) / kHnsPerSecond; 
 //     plus petit (arrivée - horodatage) observé, qui suit lentement une dérive d'horloge (kDriftPerSecond) et
 //     repart de zéro après une discontinuité, un retour en arrière ou un trou > kResyncGap. La gigue de
 //     livraison (USB, ordonnanceur) disparaît ; le résultat n'est jamais postérieur à l'arrivée.
-//  3. Sans horodatage du tout : l'arrivée.
+//  3. Sans horodatage (absent, négatif, ou figé : même valeur deux fois de suite, ex. toujours 0) : l'arrivée.
+// Garde-fous : le résultat ne recule jamais et ne se répète pas (+kMinStep au moins) hors discontinuité, et
+// n'est jamais postérieur à l'arrivée.
 class TimestampMapper {
 public:
     enum class Basis { None, Device, Mapped, Arrival };
@@ -32,6 +34,7 @@ public:
     static constexpr double kFutureSlack    = 0.002;   // s : tolérance d'un horodatage pilote « en avance »
     static constexpr double kDriftPerSecond = 0.0002;  // remontée max du décalage (0,2 ms par seconde, 200 ppm)
     static constexpr double kResyncGap      = 1.0;     // s : trou d'horodatage qui impose un recalage
+    static constexpr double kMinStep        = 1e-4;    // s : écart minimal entre deux images (garde-fou)
 
     // device_qpc_hns : MFSampleExtension_DeviceReferenceSystemTime ; sample_hns : IMFSample::GetSampleTime ;
     // discontinuity : MFSampleExtension_Discontinuity, tick de flux ou changement de format ;
@@ -42,7 +45,12 @@ public:
     void   reset() { *this = TimestampMapper{}; }
 
 private:
+    double map_raw(std::optional<int64_t> device_qpc_hns, std::optional<int64_t> sample_hns, bool discontinuity,
+                   double arrival);
+
     Basis  basis_    = Basis::None;
+    bool   have_out_ = false;
+    double last_out_ = 0.0;
     bool   anchored_ = false;
     double offset_   = 0.0;  // arrivée - horodatage (s), borne basse observée
     double last_s_   = 0.0;  // dernier horodatage MF (s)

@@ -307,7 +307,12 @@ bool MfCaptureSource::Impl::on_sample(HRESULT hr, DWORD flags, LONGLONG ts, IMFS
     UINT64                 dt = 0;
     if (SUCCEEDED(sample->GetUINT64(kDeviceReferenceSystemTime, &dt)) && dt) device_time = int64_t(dt);
     if (MFGetAttributeUINT32(sample.Get(), MFSampleExtension_Discontinuity, FALSE)) discontinuity = true;
-    const double t = mapper.map(device_time, int64_t(ts), discontinuity, arrival);
+    // Horodatage de l'échantillon seulement s'il en a un (GetSampleTime échoue sinon) ; `ts` de ReadSample en repli.
+    std::optional<int64_t> sample_time;
+    LONGLONG               st = 0;
+    if (SUCCEEDED(sample->GetSampleTime(&st))) sample_time = int64_t(st);
+    else if (ts > 0) sample_time = int64_t(ts);
+    const double t = mapper.map(device_time, sample_time, discontinuity, arrival);
     discontinuity  = false;
     basis          = int(mapper.basis());
     {

@@ -10,6 +10,18 @@ namespace capture_logic {
 
 double TimestampMapper::map(std::optional<int64_t> device_qpc_hns, std::optional<int64_t> sample_hns,
                             bool discontinuity, double arrival) {
+    const double t = map_raw(device_qpc_hns, sample_hns, discontinuity, arrival);
+    // Garde-fou : jamais de retour en arrière ni d'égalité entre deux images d'un même flux (l'interpolation
+    // divise par l'écart) ; jamais après l'arrivée. Une discontinuité autorise un recalage.
+    double out = t;
+    if (have_out_ && !discontinuity && out <= last_out_) out = std::min(arrival, last_out_ + kMinStep);
+    have_out_ = true;
+    last_out_ = out;
+    return out;
+}
+
+double TimestampMapper::map_raw(std::optional<int64_t> device_qpc_hns, std::optional<int64_t> sample_hns,
+                                bool discontinuity, double arrival) {
     if (device_qpc_hns && *device_qpc_hns > 0) {
         const double t   = hns_to_seconds(*device_qpc_hns);
         const double lag = arrival - t;
@@ -18,10 +30,15 @@ double TimestampMapper::map(std::optional<int64_t> device_qpc_hns, std::optional
             return std::min(t, arrival);
         }
     }
-    if (sample_hns) {
+    if (sample_hns && *sample_hns >= 0) {
         const double s = hns_to_seconds(*sample_hns);
+        // Horodatage figé (pilote qui renvoie toujours 0 ou la même valeur) : inutilisable, on garde l'ancre.
+        if (anchored_ && !discontinuity && s == last_s_) {
+            basis_ = Basis::Arrival;
+            return arrival;
+        }
         const double candidate = arrival - s;
-        if (!anchored_ || discontinuity || s <= last_s_ || s - last_s_ > kResyncGap) {
+        if (!anchored_ || discontinuity || s < last_s_ || s - last_s_ > kResyncGap) {
             offset_   = candidate;
             anchored_ = true;
         } else if (candidate < offset_) {

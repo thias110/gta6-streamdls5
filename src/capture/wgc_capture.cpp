@@ -254,6 +254,7 @@ bool WgcSource::poll(SourceFrame& out) {
         out.texture = &m.crop;
         out.time    = ts;
         ok = true;
+        m.warned_small = false;  // re-prévenir si la fenêtre redevient trop petite plus tard
     } else if (!m.warned_small) {
         log_msg("Fenêtre cible minimisée ou trop petite : capture ignorée");
         m.warned_small = true;

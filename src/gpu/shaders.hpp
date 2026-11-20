@@ -123,6 +123,153 @@ float4 ps_denoise(VSOut i) : SV_Target {
 )HLSL";
 
 // ---------------------------------------------------------------------------------------------
+// --enhance, étage B (après l'upscale, à la taille de sortie, BGRA8 -> BGRA8), dans cet ordre :
+//  1. netteté adaptative : c + k (c - moyenne pondérée 3x3), k réduit sur les zones plates (bruit) et sur les
+//     contours déjà très contrastés (texte, HUD), puis borné au min/max du voisinage 3x3 : aucun dépassement,
+//     donc aucun halo, par construction (principe « contrast adaptive » d'AMD FidelityFX CAS, MIT ; code et
+//     formules propres à rpenhance, voir THIRD-PARTY-NOTICES.md) ;
+//  2. clarté : luminance - base floue à grand rayon (niveau 1 de la pyramide de luminance, ~8 px de capture),
+//     écrêtée en douceur, atténuée dans les ombres/hautes lumières et là où la base varie fort (grand contour à
+//     proximité : c'est là que naîtraient les halos d'un unsharp à grand rayon) ;
+//  3. courbe de tons douce en S sur la luminance (points fixes 0, 0.5 et 1, pente >= 1 - tone/2 : monotone) ;
+//  4. saturation : < 1 uniforme ; > 1 façon « vibrance » (moins de gain sur les couleurs déjà saturées) ;
+//  5. dithering triangulaire de +-1 niveau sur les seuls pixels modifiés (évite le banding des dégradés).
+// HUD / texte fixe : près d'un bord (masque de bords existant, sinon Sobel sur le niveau 0) et stable depuis la
+// frame unique précédente, netteté et clarté sont réduites à 25 %.
+// Références CPU et constantes : enhance::sharpen_gain, clarity_boost, tone_curve, saturate_rgb, finish_ref.
+inline constexpr char kFinish[] = R"HLSL(
+Texture2D<float4> g_fin_src  : register(t0);
+Texture2D<float>  g_fin_l0   : register(t1);  // luminance, niveau 0 de la pyramide de cette frame
+Texture2D<float>  g_fin_lp   : register(t2);  // luminance, niveau 0 de la frame unique précédente (stabilité)
+Texture2D<float>  g_fin_base : register(t3);  // luminance, niveau 1 : base floue de la clarté
+Texture2D<float>  g_fin_edge : register(t4);  // masque de bords dilaté (cs_edge_*), si déjà calculé
+cbuffer FinishCB : register(b0) {
+    float g_fin_sharpen;
+    float g_fin_clarity;
+    float g_fin_tone;
+    float g_fin_sat;
+    float g_fin_dither;
+    float g_fin_hud;       // 1 : protection du HUD (bords stables)
+    float g_fin_has_prev;  // g_fin_lp valide
+    float g_fin_has_edge;  // g_fin_edge valide (sinon Sobel sur g_fin_l0)
+    float g_fin_has_pyr;   // g_fin_l0 / g_fin_base valides
+    float3 g_fin_pad;
+};
+
+float min3c(float3 v) { return min(v.x, min(v.y, v.z)); }
+
+// enhance::sharpen_gain
+float sharpen_gain(float range, float amount) {
+    return amount * 1.6 * smoothstep(0.01, 0.04, range) * (1.0 - 0.75 * smoothstep(0.2, 0.5, range));
+}
+// enhance::clarity_boost
+float clarity_boost(float y, float base, float spread, float amount) {
+    float d = y - base;
+    float b = amount * 0.8 * d / (1.0 + abs(d) * 10.0);
+    return b * saturate(4.0 * y * (1.0 - y)) * (1.0 - smoothstep(0.06, 0.2, spread));
+}
+// enhance::tone_curve
+float tone_curve(float x, float amount) {
+    float a = 0.5 * amount;
+    return x - a * x * (1.0 - x) * (1.0 - 2.0 * x);
+}
+// enhance::saturate_rgb
+float3 saturate_rgb(float3 c, float s) {
+    float y = luma(c);
+    float k = s >= 1.0 ? 1.0 + (s - 1.0) * (1.0 - saturate(max3(c) - min3c(c))) : s;
+    return y + (c - y) * k;
+}
+float ehash(uint2 p) {
+    uint h = p.x * 1973u + p.y * 9277u + 26699u;
+    h = (h ^ (h >> 15)) * 0x2c1b3c6du;
+    h = (h ^ (h >> 12)) * 0x297a2d39u;
+    h ^= h >> 15;
+    return float(h & 0xffffu) * (1.0 / 65535.0);
+}
+
+float3 fin_load(int2 p, int2 m) { return g_fin_src.Load(int3(clamp(p, 0, m), 0)).rgb; }
+
+float4 ps_finish(VSOut i) : SV_Target {
+    uint w, h;
+    g_fin_src.GetDimensions(w, h);
+    int2   m  = int2(w, h) - 1;
+    int2   p  = int2(i.pos.xy);
+    float2 uv = i.uv;
+    float3 c0 = fin_load(p, m);
+    float3 c  = c0;
+
+    // Masque HUD : bord net (dans la capture) et stable depuis la frame unique précédente.
+    float protect = 1.0;
+    if (g_fin_hud > 0.5 && g_fin_has_pyr > 0.5 && g_fin_has_prev > 0.5) {
+        float edge;
+        if (g_fin_has_edge > 0.5) {
+            edge = g_fin_edge.SampleLevel(g_linear, uv, 0);
+        } else {
+            uint lw, lh;
+            g_fin_l0.GetDimensions(lw, lh);
+            float2 o  = 1.0 / float2(lw, lh);
+            float tl = g_fin_l0.SampleLevel(g_linear, uv + float2(-o.x, -o.y), 0);
+            float tc = g_fin_l0.SampleLevel(g_linear, uv + float2(0.0, -o.y), 0);
+            float tr = g_fin_l0.SampleLevel(g_linear, uv + float2(o.x, -o.y), 0);
+            float ml = g_fin_l0.SampleLevel(g_linear, uv + float2(-o.x, 0.0), 0);
+            float mr = g_fin_l0.SampleLevel(g_linear, uv + float2(o.x, 0.0), 0);
+            float bl = g_fin_l0.SampleLevel(g_linear, uv + float2(-o.x, o.y), 0);
+            float bc = g_fin_l0.SampleLevel(g_linear, uv + float2(0.0, o.y), 0);
+            float br = g_fin_l0.SampleLevel(g_linear, uv + float2(o.x, o.y), 0);
+            float gx = (tr + 2.0 * mr + br) - (tl + 2.0 * ml + bl);
+            float gy = (bl + 2.0 * bc + br) - (tl + 2.0 * tc + tr);
+            edge = smoothstep(4.0 * 16.0 / 255.0, 4.0 * 32.0 / 255.0, abs(gx) + abs(gy));  // seuils de cs_edge_sobel
+        }
+        float dl    = abs(g_fin_l0.SampleLevel(g_linear, uv, 0) - g_fin_lp.SampleLevel(g_linear, uv, 0));
+        float still = 1.0 - smoothstep(0.02, 0.06, dl);
+        protect = 1.0 - 0.75 * edge * still;
+    }
+
+    // 1. Netteté adaptative bornée au voisinage 3x3.
+    if (g_fin_sharpen > 0.0) {
+        float3 n  = fin_load(p + int2(0, -1), m), s  = fin_load(p + int2(0, 1), m);
+        float3 e  = fin_load(p + int2(1, 0), m),  wv = fin_load(p + int2(-1, 0), m);
+        float3 nw = fin_load(p + int2(-1, -1), m), ne = fin_load(p + int2(1, -1), m);
+        float3 sw = fin_load(p + int2(-1, 1), m),  se = fin_load(p + int2(1, 1), m);
+        float3 mn  = min(c, min(min(min(n, s), min(e, wv)), min(min(nw, ne), min(sw, se))));
+        float3 mx  = max(c, max(max(max(n, s), max(e, wv)), max(max(nw, ne), max(sw, se))));
+        float3 avg = (n + s + e + wv) * 0.2 + (nw + ne + sw + se) * 0.05;
+        float  k   = sharpen_gain(max3(mx - mn), g_fin_sharpen) * protect;
+        c = clamp(c + k * (c - avg), mn, mx);
+    }
+
+    // 2. Clarté (contraste local, luminance seule).
+    if (g_fin_clarity > 0.0 && g_fin_has_pyr > 0.5) {
+        uint bw, bh;
+        g_fin_base.GetDimensions(bw, bh);
+        float2 o  = 1.0 / float2(bw, bh);
+        float b0 = g_fin_base.SampleLevel(g_linear, uv + float2(-o.x, -o.y), 0);
+        float b1 = g_fin_base.SampleLevel(g_linear, uv + float2( o.x, -o.y), 0);
+        float b2 = g_fin_base.SampleLevel(g_linear, uv + float2(-o.x,  o.y), 0);
+        float b3 = g_fin_base.SampleLevel(g_linear, uv + float2( o.x,  o.y), 0);
+        float base   = (b0 + b1 + b2 + b3) * 0.25;
+        float spread = max(max(b0, b1), max(b2, b3)) - min(min(b0, b1), min(b2, b3));
+        c += clarity_boost(saturate(luma(c)), base, spread, g_fin_clarity) * protect;
+    }
+
+    // 3. Courbe de tons (luminance, décalage additif : la chrominance ne bouge pas).
+    if (g_fin_tone > 0.0) {
+        float y = saturate(luma(c));
+        c += tone_curve(y, g_fin_tone) - y;
+    }
+
+    // 4. Saturation / vibrance.
+    if (g_fin_sat != 1.0) c = saturate_rgb(c, g_fin_sat);
+
+    c = saturate(c);
+    // 5. Dithering triangulaire (+-1 niveau) sur les pixels modifiés seulement.
+    if (g_fin_dither > 0.0 && max3(abs(c - c0)) > 0.25 / 255.0)
+        c = saturate(c + (ehash(uint2(p)) + ehash(uint2(p) + uint2(37u, 17u)) - 1.0) * (1.0 / 255.0));
+    return float4(c, 1.0);
+}
+)HLSL";
+
+// ---------------------------------------------------------------------------------------------
 // Pyramide de luminance (niveau 0 = demi-résolution de la capture)
 inline constexpr char kLuma[] = R"HLSL(
 Texture2D<float4>  g_rgb  : register(t0);

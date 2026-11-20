@@ -181,9 +181,18 @@ bool Pipeline::accept(const GpuTexture& src, double time, double arrival, Unique
     if (enh.enabled && enh.denoise > 0.0f) up_src = &enhancer_.denoise(src, enh.denoise);  // étage A
 
     prof_.begin(ctx, GpuSection::Upscale);
-    const GpuTexture& up = upscaler_.run(*up_src, output_, settings.upscale, settings.sharpness);
+    const GpuTexture* up = &upscaler_.run(*up_src, output_, settings.upscale, settings.sharpness);
+    if (enh.enabled && Enhancer::finish_needed(enh)) {  // étage B, sur l'image upscalée
+        Enhancer::FinishInputs fi;
+        fi.cur         = &slot.pyr;
+        // Stabilité du HUD mesurée contre la frame unique précédente du même plan seulement.
+        fi.prev        = last && !cut && !hint.damaged && !last->damaged ? &last->pyr : nullptr;
+        fi.edges       = slot.has_edges ? slot.edges.srv.Get() : nullptr;
+        fi.hud_protect = settings.synth.hud_protect;
+        up             = &enhancer_.finish(*up, enh, fi);
+    }
     slot.up.ensure(dev, output_.width, output_.height, DXGI_FORMAT_B8G8R8A8_UNORM, D3D11_BIND_SHADER_RESOURCE, "up");
-    ctx->CopyResource(slot.up.tex.Get(), up.tex.Get());
+    ctx->CopyResource(slot.up.tex.Get(), up->tex.Get());
     prof_.end(ctx, GpuSection::Upscale);
     info_.upscale_path = upscaler_.last_path();
     info_.vsr_status   = upscaler_.vsr_status();

@@ -45,6 +45,23 @@ struct Image8 {
 // Référence CPU de ps_denoise (bords : texels répétés, comme clamp() dans le shader). Alpha forcé à 255.
 Image8 denoise_ref(const Image8& src, float strength);
 
+// ----- Étage B : finition après l'upscale (ps_finish) ---------------------------------------------------------
+// Gain de netteté pour une étendue locale (max - min du 3x3, 0..1) : nul sur les zones plates (bruit), réduit à
+// 25 % sur les contours déjà très contrastés. Le résultat est ensuite borné au min/max du 3x3 (pas de halo).
+float sharpen_gain(float range, float amount);
+// Clarté : décalage de luminance pour y (0..1), la base floue à grand rayon et l'écart entre ses 4 échantillons
+// (spread). |résultat| < amount * 0.08 ; nul en y = 0 ou 1 ; nul quand spread >= 0.2 (grand contour proche).
+float clarity_boost(float y, float base, float spread, float amount);
+// Courbe de tons en S : x - a x (1 - x)(1 - 2x), a = amount / 2. Points fixes 0, 0.5, 1 ; pente >= 1 - a > 0.
+float tone_curve(float x, float amount);
+// Saturation autour de la luminance (BT.709) ; s > 1 : gain réduit sur les couleurs déjà saturées (vibrance).
+void  saturate_rgb(float rgb[3], float s);
+float luma(const float rgb[3]);
+
+// Référence CPU de ps_finish sans pyramide ni masque HUD ni dithering : netteté, courbe de tons, saturation
+// (la clarté est ignorée : elle dépend de la pyramide de luminance GPU). Bords : texels répétés.
+Image8 finish_ref(const Image8& src, const Params& p);
+
 // ----- Lissage des réglages --------------------------------------------------------------------------------
 // Les changements (curseurs de l'overlay, activation) sont amenés en douceur (constante de temps tau) pour éviter
 // un saut visible d'une image à l'autre. Premier appel, ou pause > 1 s : valeurs prises telles quelles.

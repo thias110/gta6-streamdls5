@@ -111,4 +111,14 @@ SOFTWARE.
   Le code C++/HLSL de rpenhance qui met ces idées en œuvre est une réimplémentation indépendante
   (structures, seuils et algorithmes de détail propres à rpenhance).
 
+- **AMD FidelityFX Contrast Adaptive Sharpening (CAS)** (https://github.com/GPUOpen-Effects/FidelityFX-CAS,
+  licence MIT, Copyright (c) 2019-2020 Advanced Micro Devices, Inc.). Idée reprise pour la netteté de
+  `--enhance` (`ps_finish`, `src/gpu/shaders.hpp`) : moduler le gain de netteté selon le contraste local
+  du voisinage 3x3 pour ne pas sur-accentuer les zones déjà contrastées. Aucun code ni aucune formule de
+  CAS n'est copié : le filtre de rpenhance (moyenne pondérée 3x3, gain par `smoothstep` sur l'étendue
+  locale, résultat borné au min/max du voisinage) est écrit pour rpenhance.
+- Les autres traitements de `--enhance` sont des techniques classiques publiées (algorithmes seulement,
+  aucun code repris), écrites pour rpenhance : filtre bilatéral (Tomasi et Manduchi, 1998), masque flou (« unsharp mask ») à grand rayon
+  sur la luminance, courbe de tons polynomiale, dithering triangulaire (TPDF).
+
 Aucun code de projets sous GPL ou AGPL (Veyra, chiaki-ng...) n'est inclus dans rpenhance.

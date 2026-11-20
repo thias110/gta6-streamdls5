@@ -17,7 +17,7 @@ extern IMGUI_IMPL_API LRESULT ImGui_ImplWin32_WndProcHandler(HWND hWnd, UINT msg
 #endif
 
 namespace {
-enum HotkeyId { kHkStats = 1, kHkUpscale, kHkFrameGen, kHkCompare, kHkFlow, kHkQuit };
+enum HotkeyId { kHkStats = 1, kHkUpscale, kHkFrameGen, kHkCompare, kHkFlow, kHkEnhance, kHkQuit };
 
 struct MonitorEnum {
     std::vector<HMONITOR> list;
@@ -201,6 +201,7 @@ void App::on_hotkey(int id) {
     case kHkFrameGen: s.frame_gen = !s.frame_gen; break;
     case kHkCompare: s.compare = !s.compare; break;
     case kHkFlow: s.flow_viz = !s.flow_viz; break;
+    case kHkEnhance: s.enhance.enabled = !s.enhance.enabled; break;
     case kHkQuit: quit_ = true; break;
     default: break;
     }
@@ -249,6 +250,10 @@ int App::run() {
     s.adaptive_dedupe = cfg_.adaptive_dedupe;
     s.cut.enabled     = !cfg_.simple_cuts;
     s.synth.hud_protect = cfg_.hud_protect;
+    s.enhance           = cfg_.enhance;
+    if (s.enhance.enabled)
+        log_msg("Amélioration d'image active : débruitage %.2f, netteté %.2f, clarté %.2f, tons %.2f, saturation %.2f",
+                s.enhance.denoise, s.enhance.sharpen, s.enhance.clarity, s.enhance.tone, s.enhance.saturation);
     s.delay_scale   = cfg_.delay_scale;
     s.trust_source_flags = cfg_.tap_trust_flags && cfg_.source == SourceKind::Tap && !cfg_.test_pattern;
     if (cfg_.tap_trust_flags && !s.trust_source_flags)
@@ -292,7 +297,8 @@ int App::run() {
     const UINT mods = MOD_CONTROL | MOD_ALT | MOD_NOREPEAT;
     hotkeys_ = true;
     const std::pair<int, UINT> keys[] = {{kHkStats, 'S'}, {kHkUpscale, 'U'}, {kHkFrameGen, 'F'},
-                                         {kHkCompare, 'C'}, {kHkFlow, 'V'},   {kHkQuit, 'Q'}};
+                                         {kHkCompare, 'C'}, {kHkFlow, 'V'},   {kHkEnhance, 'E'},
+                                         {kHkQuit, 'Q'}};
     for (auto [id, vk] : keys) {
         if (!RegisterHotKey(hwnd_, id, mods, vk)) log_msg("Raccourci Ctrl+Alt+%c déjà pris par une autre appli", char(vk));
     }
@@ -430,6 +436,9 @@ int App::run() {
                     st.captured_fps, st.unique_fps, st.present_fps, st.generated_pct, info.capture.width,
                     info.capture.height, info.output.width, info.output.height,
                     Upscaler::path_name(info.upscale_path), info.delay_ms, prof_.ms(GpuSection::Flow));
+            if (info.enhance_active)
+                log_msg("amélioration : GPU débruitage %.2f ms, finition %.2f ms", prof_.ms(GpuSection::Denoise),
+                        prof_.ms(GpuSection::Finish));
             if (audio_.running())
                 log_msg("son : %.1f ms en tampon, retard %.0f ms (%s, en attente %.0f ms) | dérive %+.0f ppm | "
                         "%llu trames relayées, %llu jetées",

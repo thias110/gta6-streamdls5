@@ -49,6 +49,22 @@ const wchar_t* usage_text() {
   --vfg-mode low|medium|high  modèle VFG (défaut : medium)
   --nvvfx-vsr-mode <0..4>     mode VSR du SDK : 0 bicubic .. 4 ultra (défaut : 3)
   --sharpness <0..1>          netteté du mode bicubic (défaut : 0.35)
+
+  Amélioration d'image (traitements maison, tous GPU ; désactivée par défaut) :
+  --enhance off|on            active l'étage de nettoyage/finition (défaut : off,
+                              rendu identique à sans l'option). Ctrl+Alt+E bascule.
+  --denoise <0..1>            étage A, avant l'upscale : débruitage/déblocking
+                              bilatéral conservant les contours (défaut : 0.35)
+  --sharpen <0..1>            étage B, après l'upscale : netteté adaptative sans
+                              dépassement (défaut : 0.35)
+  --clarity <0..1>            contraste local à grand rayon (défaut : 0.2)
+  --tone <0..1>               courbe de tons douce en S (défaut : 0.2)
+  --saturation <0.5..1.5>     saturation, 1 = neutre ; > 1 façon vibrance (défaut : 1.05)
+                              0 (ou 1 pour la saturation) désactive l'effet concerné ;
+                              sans --enhance on, ces valeurs servent de point de départ
+                              aux curseurs de l'overlay. Forte intensité : rendu
+                              artificiel (aplats « cireux », contours durs) ; coût GPU
+                              affiché dans l'overlay.
   --no-fg                     désactive la frame generation
   --dup-threshold <x>         seuil de base de détection des doublons (défaut : 1.2, 0.4 en HDMI)
   --no-adaptive-dedupe        seuil de doublon fixe, sans verrou de rythme
@@ -83,7 +99,7 @@ const wchar_t* usage_text() {
                               une fonctionnalité D3D11 nécessaire)
 
 Raccourcis globaux : Ctrl+Alt+S stats, U upscale, F frame gen,
-                     C comparaison, V flow, Q quitter)";
+                     C comparaison, V flow, E amélioration, Q quitter)";
 }
 
 Config parse_command_line() {
@@ -148,6 +164,17 @@ Config parse_command_line() {
         else if (s == L"--no-fg") c.frame_gen = false;
         else if (s == L"--fg") c.frame_gen = true;
         else if (s == L"--sharpness") c.sharpness = number(i);
+        else if (s == L"--enhance") {
+            auto v = to_lower(value(i));
+            if (v == L"on") c.enhance.enabled = true;
+            else if (v == L"off") c.enhance.enabled = false;
+            else throw std::invalid_argument("--enhance attend on ou off");
+        }
+        else if (s == L"--denoise") c.enhance.denoise = number(i);
+        else if (s == L"--sharpen") c.enhance.sharpen = number(i);
+        else if (s == L"--clarity") c.enhance.clarity = number(i);
+        else if (s == L"--tone") c.enhance.tone = number(i);
+        else if (s == L"--saturation") c.enhance.saturation = number(i);
         else if (s == L"--dup-threshold") { c.dup_threshold = number(i); dup_set = true; }
         else if (s == L"--no-adaptive-dedupe") c.adaptive_dedupe = false;
         else if (s == L"--simple-cuts") c.simple_cuts = true;
@@ -198,6 +225,7 @@ Config parse_command_line() {
 
     c.audio_volume  = std::clamp(c.audio_volume, 0.0f, 1.0f);
     c.sharpness     = std::clamp(c.sharpness, 0.0f, 1.0f);
+    c.enhance       = enhance::clamp_params(c.enhance);
     c.dup_threshold = std::clamp(c.dup_threshold, 0.0f, 50.0f);
     c.delay_scale   = std::clamp(c.delay_scale, 1.0f, 3.0f);
     c.flow_scale    = std::clamp(c.flow_scale, 0.5f, 1.0f);

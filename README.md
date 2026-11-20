@@ -116,7 +116,7 @@ bloquant ; ses journaux sont dans `tap-logs/` du même artefact.
 4. Si la manette ne répond plus, fais Alt+Tab vers la remote play (l'overlay reste au-dessus).
 
 Raccourcis globaux : **Ctrl+Alt+S** stats, **U** upscale, **F** frame generation, **C** comparaison
-avant/après, **V** visualisation du flow, **Q** quitter.
+avant/après, **V** visualisation du flow, **E** amélioration d'image (`--enhance`), **Q** quitter.
 
 Options : `rpenhance.exe --help`. Les plus utiles :
 
@@ -131,12 +131,83 @@ Options : `rpenhance.exe --help`. Les plus utiles :
 | `--no-hud-protect` | pas de masque de bords pour garder le HUD fixe |
 | `--delay 1.15` | marge du retard ; à monter si l'image saccade quand le réseau varie |
 | `--flow-scale 0.75` | flow estimé à résolution réduite (0.5 à 1.0, défaut 1.0) : moins de GPU, vecteurs plus grossiers ; synthèse toujours en pleine résolution |
+| `--enhance on` | amélioration d'image maison (débruitage, netteté, clarté, tons, saturation), voir « Amélioration d'image » |
 | `--windowed` | fenêtre classique au lieu de l'overlay |
 | `--monitor 1` | overlay sur un autre écran |
 | `--capturable` | l'overlay reste visible des captures d'écran (OBS, partage) |
 | `--source wgc\|tap\|capture` | fenêtre Remote Play (défaut), frame tap, ou carte de capture HDMI (voir « Deux modes ») |
 
 Le journal est écrit dans `rpenhance.log` à côté de l'exe (stats toutes les 5 s).
+
+## Amélioration d'image (`--enhance`, expérimental)
+
+Étage optionnel pour une image plus nette et plus éclatante, **désactivé par défaut** : sans
+`--enhance on`, le pipeline suit exactement le même chemin qu'avant (aucune passe ajoutée). Tout est
+écrit pour rpenhance (HLSL + C++, MIT), sans SDK NVIDIA ni modèle : ça marche sur tout GPU D3D11, avec
+`vsr`, `bicubic` ou `off`.
+
+```
+capture ─► [A] débruitage/déblocking ─► upscale (VSR, bicubique...) ─► [B] finition ─► historique, interpolation
+```
+
+- **Étage A (`--denoise`)**, sur la frame unique avant l'upscale : filtre bilatéral 5×5. Il lisse le
+  bruit et les marches de blocs de compression d'un flux H.264/HEVC (quelques niveaux sur 255) sans
+  toucher aux vrais contours (dizaines de niveaux), pour que l'upscale ne les amplifie pas. Intensité
+  0..1 : seuil de 2 à 12 niveaux, rayon spatial 1 à 1,6 px.
+- **Étage B**, une fois par frame unique sur l'image upscalée (les images interpolées en héritent) :
+  - `--sharpen` : netteté adaptative (idée de CAS d'AMD, MIT, réécrite : voir
+    THIRD-PARTY-NOTICES.md) ; gain nul sur les aplats (bruit), réduit sur les contours déjà très
+    contrastés, et résultat borné au min/max du voisinage 3×3 : **aucun dépassement, donc pas de
+    halo**, par construction ;
+  - `--clarity` : contraste local à grand rayon (~8 px de capture) sur la luminance, écrêté en
+    douceur, atténué dans les ombres/hautes lumières et coupé près des grands contours (là où un
+    masque flou à grand rayon ferait des halos) ;
+  - `--tone` : courbe de tons douce en S (noir, gris moyen et blanc fixes, toujours croissante) ;
+  - `--saturation` : 1 = neutre ; au-dessus de 1, gain réduit sur les couleurs déjà saturées
+    (« vibrance ») ; en dessous, désaturation uniforme ;
+  - dithering de ±1 niveau sur les seuls pixels modifiés, contre le banding des dégradés.
+- **HUD fixe** : près d'un bord net (masque de bords de la protection du HUD, sinon Sobel) et stable
+  depuis la frame unique précédente, netteté et clarté sont ramenées à 25 %. `--no-hud-protect` coupe
+  aussi cette protection.
+- Format : tout reste en BGRA 8 bits, le format du pipeline (pas d'aller-retour par un format qui
+  dégrade). Chaque passe arrondit à 8 bits ; le dithering de l'étage B masque ce pas.
+
+| Option | Défaut | Effet |
+|---|---|---|
+| `--enhance off\|on` | `off` | active les deux étages (Ctrl+Alt+E bascule, en fondu) |
+| `--denoise 0..1` | 0.35 | étage A, débruitage/déblocking avant l'upscale |
+| `--sharpen 0..1` | 0.35 | netteté adaptative |
+| `--clarity 0..1` | 0.2 | contraste local |
+| `--tone 0..1` | 0.2 | courbe de tons |
+| `--saturation 0.5..1.5` | 1.05 | saturation / vibrance |
+
+Une valeur de 0 (1 pour la saturation) désactive l'effet concerné ; les valeurs hors bornes sont
+ramenées dans les bornes. Les mêmes curseurs sont dans l'overlay (« Amélioration d'image », avec
+« Valeurs d'origine » pour revenir aux défauts ci-dessus) ; les changements sont appliqués en fondu
+(~0,15 s). La comparaison **Ctrl+Alt+C** montre à gauche la capture brute (sans upscale ni
+amélioration) et à droite l'image traitée. Les temps GPU des deux étages (« débruitage »,
+« finition ») sont dans l'overlay, le journal et le selftest.
+
+Limites, à lire avant de pousser les curseurs :
+
+- À forte intensité le rendu devient artificiel : `--denoise` haut efface les textures fines
+  (aplats « cireux », effet plastique), `--sharpen`/`--clarity` hauts durcissent les contours et
+  font ressortir le bruit restant, `--tone`/`--saturation` hauts écrasent ombres et couleurs. Les
+  valeurs par défaut sont volontairement modérées ; elles ont été choisies sur la mire et sur des
+  images synthétiques, **pas sur du vrai flux Remote Play** : à ajuster à l'œil.
+- Le débruitage ne connaît pas la grille de blocs du codec (la fenêtre Remote Play est souvent
+  redimensionnée) : il traite les marches de blocs comme du bruit de faible amplitude. Une forte
+  compression (mouvements rapides, débit faible) laisse des blocs plus marqués que son seuil.
+- En HDMI (`--source capture`), il n'y a pas de compression : le débruitage sert peu, `--denoise 0`
+  évite de lisser pour rien.
+- La clarté est volontairement atténuée près des grands contours, mais un léger halo reste possible
+  à forte intensité (mesuré par le selftest). La netteté, elle, est bornée.
+- Coût : non mesuré sur un vrai GPU. Ordre de grandeur par lecture du code : 25 lectures de texture
+  par pixel de capture pour l'étage A, une vingtaine par pixel de sortie pour l'étage B. Les temps
+  sont affichés dans l'overlay ; ceux de la CI (WARP, rendu logiciel) ne valent rien.
+- Écrit sans MSVC ni GPU : HLSL vérifié avec dxc (profil 6_0, l'appli compile en 5_0 avec FXC),
+  C++ avec clang/llvm-mingw, logique pure et références CPU des filtres par `ctest`. La qualité
+  réelle est à juger sur Windows.
 
 ## Source « frame tap » (expérimental)
 

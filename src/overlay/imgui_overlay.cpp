@@ -90,6 +90,9 @@ void ImguiOverlay::render(ID3D11RenderTargetView* rtv, OverlayModel& m, Pipeline
         ImGui::TextDisabled("lectures de mesure bloquantes : %llu", static_cast<unsigned long long>(info.blocking_reads));
         ImGui::Text("analyse %.2f  upscale %.2f  flow %.2f  rendu %.2f", prof.ms(GpuSection::Analyze),
                     prof.ms(GpuSection::Upscale), prof.ms(GpuSection::Flow), prof.ms(GpuSection::Compose));
+        if (info.enhance_active)
+            ImGui::Text("amélioration : débruitage %.2f  finition %.2f", prof.ms(GpuSection::Denoise),
+                        prof.ms(GpuSection::Finish));
 
         ImGui::SeparatorText("Réglages");
         const bool nv = NvvfxBackend::compiled_in();
@@ -129,6 +132,28 @@ void ImguiOverlay::render(ID3D11RenderTargetView* rtv, OverlayModel& m, Pipeline
         ImGui::Checkbox("Comparer avant | après", &set.compare);
         ImGui::SameLine();
         ImGui::Checkbox("Voir le flow", &set.flow_viz);
+        if (ImGui::CollapsingHeader("Amélioration d'image")) {
+            auto& e = set.enhance;
+            ImGui::Checkbox("Activer (Ctrl+Alt+E)", &e.enabled);
+            ImGui::TextDisabled("0 désactive l'effet ; changements appliqués en fondu");
+            ImGui::SliderFloat("Débruitage (avant upscale)", &e.denoise, 0.0f, 1.0f, "%.2f");
+            ImGui::SliderFloat("Netteté", &e.sharpen, 0.0f, 1.0f, "%.2f");
+            ImGui::SliderFloat("Clarté", &e.clarity, 0.0f, 1.0f, "%.2f");
+            ImGui::SliderFloat("Courbe de tons", &e.tone, 0.0f, 1.0f, "%.2f");
+            ImGui::SliderFloat("Saturation", &e.saturation, enhance::kSatMin, enhance::kSatMax, "%.2f");
+            ImGui::Checkbox("Dithering (anti-banding)", &e.dither);
+            ImGui::SameLine();
+            if (ImGui::Button("Valeurs d'origine")) {
+                const bool on = e.enabled;
+                e             = enhance::Params{};
+                e.enabled     = on;
+            }
+            e = enhance::clamp_params(e);  // saisie clavier (Ctrl+clic) hors bornes
+            if (e.enabled && (e.sharpen > 0.7f || e.clarity > 0.7f || e.denoise > 0.8f))
+                ImGui::TextColored(warn, "Forte intensité : risque de rendu artificiel (cire, contours durs).");
+            ImGui::TextDisabled("Comparer avant | après (Ctrl+Alt+C) : gauche = capture brute, sans upscale\n"
+                                "ni amélioration ; droite = image traitée.");
+        }
         if (ImGui::CollapsingHeader("Synthèse (avancé)")) {
             ImGui::SliderFloat("fixe min", &set.synth.static_lo, 0.0f, 0.2f);
             ImGui::SliderFloat("fixe max", &set.synth.static_hi, 0.0f, 0.3f);
@@ -149,7 +174,7 @@ void ImguiOverlay::render(ID3D11RenderTargetView* rtv, OverlayModel& m, Pipeline
         }
 
         ImGui::Separator();
-        ImGui::TextDisabled("Ctrl+Alt+ S stats  U upscale  F frame gen  C comparer  V flow  Q quitter");
+        ImGui::TextDisabled("Ctrl+Alt+ S stats  U upscale  F frame gen  C comparer  V flow  E amélioration  Q quitter");
         if (m.overlay_mode)
             ImGui::TextDisabled("L'overlay ne prend jamais le focus : la manette reste sur Remote Play.");
         if (ImGui::Button("Quitter")) quit_requested = true;

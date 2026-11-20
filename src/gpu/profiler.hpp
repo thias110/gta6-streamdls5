@@ -1,7 +1,8 @@
 #pragma once
 #include "../common.hpp"
 
-enum class GpuSection : int { Analyze = 0, Upscale, Flow, Compose, Count };
+// Denoise / Finish : étages A et B de --enhance (comptés à part de l'upscale).
+enum class GpuSection : int { Analyze = 0, Upscale, Flow, Compose, Denoise, Finish, Count };
 
 // Timestamps GPU D3D11, relus avec quelques frames de retard (jamais bloquant).
 class GpuProfiler {
@@ -15,7 +16,7 @@ public:
 
 private:
     static constexpr int kFrames = 5;
-    static constexpr int kPairs  = 16;
+    static constexpr int kPairs  = 24;  // paires de timestamps par image (plusieurs captures possibles)
     struct Pair {
         ComPtr<ID3D11Query> b, e;
         GpuSection          section{};

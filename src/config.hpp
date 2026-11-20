@@ -1,6 +1,7 @@
 #pragma once
 #include "common.hpp"
 #include "capture/audio_delay.hpp"
+#include "pipeline/enhance_logic.hpp"
 
 enum class UpscaleMode : int {
     Off     = 0,  // étirement bilinéaire
@@ -55,6 +56,7 @@ struct Config {
     int   vfg_mode      = 1;      // VFG : 0 low, 1 medium, 2 high
     int   nvvfx_vsr_mode = 3;     // VSR du SDK : 0..4 (bicubic, low, medium, high, ultra)
     float sharpness     = 0.35f;
+    enhance::Params enhance;      // --enhance on|off (défaut off) et réglages --denoise, --sharpen, --clarity...
     float dup_threshold = 1.2f;   // différence moyenne max d'une tuile (0-255) sous laquelle une frame est un doublon
     bool  adaptive_dedupe = true; // le seuil suit le bruit de fond (dup_threshold = base) + verrou de rythme 2/3
     float delay_scale   = 1.15f;

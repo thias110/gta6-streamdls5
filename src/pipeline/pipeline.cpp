@@ -178,7 +178,11 @@ bool Pipeline::accept(const GpuTexture& src, double time, double arrival, Unique
     const enhance::Params enh = enh_smooth_.update(settings.enhance, arrival);
     info_.enhance_active      = enh.enabled;
     const GpuTexture* up_src  = &src;
-    if (enh.enabled && enh.denoise > 0.0f) up_src = &enhancer_.denoise(src, enh.denoise);  // étage A
+    if (enh.enabled && enh.denoise > 0.0f) {  // étage A
+        prof_.begin(ctx, GpuSection::Denoise);
+        up_src = &enhancer_.denoise(src, enh.denoise);
+        prof_.end(ctx, GpuSection::Denoise);
+    }
 
     prof_.begin(ctx, GpuSection::Upscale);
     const GpuTexture* up = &upscaler_.run(*up_src, output_, settings.upscale, settings.sharpness);
@@ -189,7 +193,11 @@ bool Pipeline::accept(const GpuTexture& src, double time, double arrival, Unique
         fi.prev        = last && !cut && !hint.damaged && !last->damaged ? &last->pyr : nullptr;
         fi.edges       = slot.has_edges ? slot.edges.srv.Get() : nullptr;
         fi.hud_protect = settings.synth.hud_protect;
-        up             = &enhancer_.finish(*up, enh, fi);
+        prof_.end(ctx, GpuSection::Upscale);
+        prof_.begin(ctx, GpuSection::Finish);
+        up = &enhancer_.finish(*up, enh, fi);
+        prof_.end(ctx, GpuSection::Finish);
+        prof_.begin(ctx, GpuSection::Upscale);  // la copie dans l'historique reste comptée avec l'upscale
     }
     slot.up.ensure(dev, output_.width, output_.height, DXGI_FORMAT_B8G8R8A8_UNORM, D3D11_BIND_SHADER_RESOURCE, "up");
     ctx->CopyResource(slot.up.tex.Get(), up->tex.Get());

@@ -431,10 +431,11 @@ int App::run() {
                     info.capture.height, info.output.width, info.output.height,
                     Upscaler::path_name(info.upscale_path), info.delay_ms, prof_.ms(GpuSection::Flow));
             if (audio_.running())
-                log_msg("son : %.1f ms en tampon, retard %.0f ms (%s, en attente %.0f ms) | %llu trames relayées, "
-                        "%llu jetées",
+                log_msg("son : %.1f ms en tampon, retard %.0f ms (%s, en attente %.0f ms) | dérive %+.0f ppm | "
+                        "%llu trames relayées, %llu jetées",
                         audio_.buffered_ms(), audio_.delay_ms(), audio_delay::describe(cfg_.audio_delay).c_str(),
-                        audio_.applied_delay_ms(), static_cast<unsigned long long>(audio_.frames_relayed()),
+                        audio_.applied_delay_ms(), double(audio_.drift_ppm()),
+                        static_cast<unsigned long long>(audio_.frames_relayed()),
                         static_cast<unsigned long long>(audio_.frames_dropped()));
         }
     }

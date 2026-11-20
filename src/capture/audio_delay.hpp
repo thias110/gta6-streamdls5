@@ -71,6 +71,7 @@ public:
     void     reset(uint32_t block_bytes);
     void     push(const uint8_t* data, uint32_t frames);  // data == nullptr : silence
     uint32_t pop(uint8_t* dst, uint32_t frames);          // renvoie le nombre de trames copiées
+    uint32_t peek(uint8_t* dst, uint32_t frames) const;   // comme pop, sans retirer les trames
     void     drop(uint32_t frames);
     uint32_t frames() const { return uint32_t(size_ / block_); }
 

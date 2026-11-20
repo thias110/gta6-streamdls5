@@ -94,6 +94,16 @@ int main() {
         f.push(in, 5);
         f.drop(3);
         expect(f.frames() == 2 && f.pop(out, 10) == 2 && out[0] == in[12], "file : drop puis pop partiel", 0);
+        FrameFifo g(4);
+        g.push(in, 900);
+        g.drop(800);
+        g.push(in, 900);  // l'anneau boucle
+        uint8_t pk[4000];
+        const uint32_t n = g.peek(pk, 500);
+        bool pok = n == 500 && g.frames() == 1000;
+        for (int i = 0; i < 400 && pok; ++i) pok = pk[i] == in[3200 + i];
+        for (int i = 0; i < 1600 && pok; ++i) pok = pk[400 + i] == in[i];
+        expect(pok && g.pop(out, 500) == 500 && std::memcmp(out, pk, 2000) == 0, "file : peek sans retirer (bouclage)", n);
     }
     {  // Simulation : capture 48 kHz par paquets de 10 ms, sortie consommée au même rythme ; le retard réel
        // (âge des trames quand elles sortent de la file) doit valoir le retard voulu.

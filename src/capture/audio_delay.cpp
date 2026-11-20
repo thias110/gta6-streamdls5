@@ -138,6 +138,19 @@ uint32_t FrameFifo::pop(uint8_t* dst, uint32_t frames) {
     return n;
 }
 
+uint32_t FrameFifo::peek(uint8_t* dst, uint32_t frames) const {
+    const uint32_t n     = std::min(frames, this->frames());
+    const size_t   bytes = size_t(n) * block_;
+    size_t         done = 0, pos = head_;
+    while (done < bytes) {
+        const size_t chunk = std::min(bytes - done, buf_.size() - pos);
+        if (dst) std::memcpy(dst + done, buf_.data() + pos, chunk);
+        done += chunk;
+        pos = (pos + chunk) % buf_.size();
+    }
+    return n;
+}
+
 void FrameFifo::drop(uint32_t frames) { pop(nullptr, frames); }
 
 }  // namespace audio_delay

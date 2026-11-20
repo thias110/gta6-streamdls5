@@ -48,6 +48,7 @@ add_executable(rpenhance WIN32
     src/capture/capture_logic.cpp
     src/capture/mf_capture.cpp
     src/capture/audio_delay.cpp
+    src/capture/audio_sync.cpp
     src/capture/audio_passthrough.cpp
     src/pipeline/compositor.cpp
     src/pipeline/motion.cpp
@@ -143,6 +144,9 @@ add_test(NAME capture_logic COMMAND rpenhance_capture_tests)
 add_executable(rpenhance_audio_delay_tests tests/audio_delay_test.cpp src/capture/audio_delay.cpp)
 target_include_directories(rpenhance_audio_delay_tests PRIVATE src)
 add_test(NAME audio_delay COMMAND rpenhance_audio_delay_tests)
+add_executable(rpenhance_audio_sync_tests tests/audio_sync_test.cpp src/capture/audio_sync.cpp src/capture/audio_delay.cpp)
+target_include_directories(rpenhance_audio_sync_tests PRIVATE src)
+add_test(NAME audio_sync COMMAND rpenhance_audio_sync_tests)
 
 # Émetteur de test du frame tap (copie adaptée de l'émetteur MIT de SmoovPlay) : alimente
 # `rpenhance --selftest-tap` dans la CI (voir .github/workflows/windows-build.yml). Programme console.
